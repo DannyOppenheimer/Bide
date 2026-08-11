@@ -1,0 +1,117 @@
+name: Bide
+
+options:
+  bundleIdPrefix: com.yourname.bide
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: "FYL86KHVDH"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+packages:
+  BideKit:
+    path: BideKit
+
+# Schemes are declared explicitly so debugging the extension is reproducible.
+# Without these, Xcode auto-creates an implicit scheme for BideMessages that
+# tries to launch the .appex as if it were an app (launch substyle 0), which
+# fails with "failed to launch or exited before the debugger could attach".
+# An iMessage extension has to be launched INTO Messages.app — substyle 2.
+schemes:
+  Bide:
+    build:
+      targets:
+        Bide: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  BideMessages:
+    build:
+      # The container app has to build too: the .appex is installed on device
+      # only as a payload inside Bide.app.
+      targets:
+        BideMessages: all
+        Bide: all
+    run:
+      config: Debug
+      # The runnable must be the .appex, not Bide.app. Substyle 2 is what
+      # tells Xcode to launch it INTO Messages.app rather than as a standalone
+      # process. Xcode will not attach LLDB to an .appex runnable, so the
+      # extension runs without a debugger attached — that is what stops the
+      # "failed to launch or exited before the debugger could attach" error.
+      # For breakpoints in the extension, use Debug > Attach to Process.
+      executable: BideMessages
+      askForAppToLaunch: true
+      launchAutomaticallySubstyle: "2"
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+targets:
+  Bide:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Bide/App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.bide
+        INFOPLIST_FILE: Bide/App/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: Bide/App/Info.plist
+      properties:
+        CFBundleDisplayName: Bide
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    # App Groups entitlement removed for now — Personal (free) teams can't
+    # provision it. Re-add group.com.yourname.bide once on a paid team
+    # and the app/extension actually need to share state.
+    dependencies:
+      - package: BideKit
+      - target: BideMessages
+        embed: true
+
+  BideMessages:
+    type: app-extension.messages
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: BideMessages
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.bide.BideMessages
+        INFOPLIST_FILE: BideMessages/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: "YES"
+    info:
+      path: BideMessages/Info.plist
+      properties:
+        CFBundleDisplayName: Bide
+        # Required for an .appex. XcodeGen does not emit it for messages
+        # extensions; without it the bundle is not a well-formed plug-in.
+        CFBundlePackageType: "XPC!"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.message-payload-provider
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).MessagesViewController
+    dependencies:
+      - package: BideKit
