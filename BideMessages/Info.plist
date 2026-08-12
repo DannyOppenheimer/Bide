@@ -27,5 +27,7 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).MessagesViewController</string>
 	</dict>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Bide shows how long it would take you to get there. Your location is used on this device only and is never sent anywhere.</string>
 </dict>
 </plist>

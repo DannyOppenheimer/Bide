@@ -1,252 +1,261 @@
-import UIKit
 import Messages
+import SwiftUI
+import UIKit
 import BideKit
+import BideUI
 
-/// The Messages extension's only screen. It is view-only per CLAUDE.md — no
-/// background work, no push registration, no location — so it just renders
-/// whatever `MeetupState` it can decode from the conversation and lets the
-/// user either propose a new tile or accept one that's already there.
+/// The Messages extension.
+///
+/// View-only, per CLAUDE.md: no background work, no push, no ActivityKit, and
+/// no writes to Bide's server. It does exactly three things — stage a tile in
+/// the conversation, let a recipient answer one, and draw the tile in the
+/// transcript — and hands anything that needs a real identity or a running ETA
+/// to the container app over `bide://`.
+///
+/// Everything visible is SwiftUI from BideUI, hosted here; this class owns only
+/// the parts that are genuinely `Messages`: conversations, message layouts, and
+/// the compact/expanded/transcript presentation styles.
 final class MessagesViewController: MSMessagesAppViewController {
 
-    // MARK: - UI
+    private let profile = BideProfileStore()
+    private let answers = LocalBideStore(defaults: .bideShared)
 
-    private let titleLabel: UILabel = {
-        let label = UILabel()
-        label.font = .preferredFont(forTextStyle: .headline)
-        label.numberOfLines = 0
-        return label
+    private lazy var model: MessagesModel = {
+        // Foreground-only location: the tile shows "36 minutes from this
+        // location" while someone is looking at it. An extension must never
+        // ask for the background kind, hence `background: false`.
+        let model = MessagesModel(
+            eta: MapKitETAEngine(locations: LocationService(background: false)),
+            store: answers
+        )
+        model.onCompose = { [weak self] draft in self?.stage(draft) }
+        model.onAccept = { [weak self] tile, mode, leaveAt in self?.accept(tile, mode: mode, leaveAt: leaveAt) }
+        model.onDecline = { [weak self] tile in self?.decline(tile) }
+        model.onNeedsRoom = { [weak self] in self?.requestPresentationStyle(.expanded) }
+        return model
     }()
 
-    private let subtitleLabel: UILabel = {
-        let label = UILabel()
-        label.font = .preferredFont(forTextStyle: .subheadline)
-        label.textColor = .secondaryLabel
-        label.numberOfLines = 0
-        return label
-    }()
-
-    private let etaLabel: UILabel = {
-        let label = UILabel()
-        label.font = .preferredFont(forTextStyle: .body)
-        label.numberOfLines = 0
-        return label
-    }()
-
-    private lazy var detailStackView: UIStackView = {
-        let stack = UIStackView(arrangedSubviews: [subtitleLabel, etaLabel])
-        stack.axis = .vertical
-        stack.spacing = 4
-        return stack
-    }()
-
-    private lazy var actionButton: UIButton = {
-        var configuration = UIButton.Configuration.filled()
-        configuration.cornerStyle = .large
-        let button = UIButton(configuration: configuration)
-        button.addTarget(self, action: #selector(actionButtonTapped), for: .touchUpInside)
-        return button
-    }()
-
-    private lazy var rootStackView: UIStackView = {
-        let stack = UIStackView(arrangedSubviews: [titleLabel, detailStackView, actionButton])
-        stack.axis = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        return stack
-    }()
-
-    // MARK: - State
-
-    private enum Mode {
-        /// No message selected — offer to send a new tile.
-        case compose
-        /// A tile from the other participant, still open — offer to accept it.
-        case respond(MeetupState, session: MSSession?)
-        /// The local user's own tile, or one that's already been accepted —
-        /// nothing to do here but show where things stand.
-        case status(MeetupState)
-    }
-
-    private var mode: Mode = .compose {
-        didSet { render() }
-    }
+    private var host: UIHostingController<AnyView>?
 
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
-        view.backgroundColor = .systemBackground
-        view.addSubview(rootStackView)
-        NSLayoutConstraint.activate([
-            rootStackView.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
-            rootStackView.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
-            rootStackView.topAnchor.constraint(equalTo: view.layoutMarginsGuide.topAnchor),
-        ])
-
-        render()
+        view.backgroundColor = UIColor(BideColor.background)
     }
-
-    // MARK: - MSMessagesAppViewController
 
     override func willBecomeActive(with conversation: MSConversation) {
         super.willBecomeActive(with: conversation)
-        configureMode(for: conversation, selected: conversation.selectedMessage)
-    }
-
-    override func didReceive(_ message: MSMessage, conversation: MSConversation) {
-        configureMode(for: conversation, selected: message)
+        render(for: conversation)
     }
 
     override func didSelect(_ message: MSMessage, conversation: MSConversation) {
-        configureMode(for: conversation, selected: message)
+        render(for: conversation)
+        // Answering needs room the drawer doesn't have.
+        if case .respond = model.screen {
+            requestPresentationStyle(.expanded)
+        }
     }
 
-    override func willTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
-        super.willTransition(to: presentationStyle)
-        applyLayout(for: presentationStyle)
+    override func didReceive(_ message: MSMessage, conversation: MSConversation) {
+        render(for: conversation)
     }
 
-    // MARK: - Mode
+    override func didTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
+        super.didTransition(to: presentationStyle)
+        guard let conversation = activeConversation else { return }
+        render(for: conversation)
+    }
 
-    private func configureMode(for conversation: MSConversation, selected message: MSMessage?) {
-        guard
-            let message,
-            let url = message.url,
-            let state = MeetupState(url: url)
-        else {
-            mode = .compose
-            return
-        }
-
-        if message.senderParticipantIdentifier == conversation.localParticipantIdentifier {
-            // We sent this one ourselves — nothing to accept.
-            mode = .status(state)
-        } else if state.status == .proposed {
-            mode = .respond(state, session: message.session)
-        } else {
-            mode = .status(state)
-        }
+    /// Sizes the bubble in the transcript. Messages asks before laying the
+    /// thread out, so this has to be cheap and deterministic.
+    override func contentSizeThatFits(_ size: CGSize) -> CGSize {
+        guard presentationStyle == .transcript, let host else { return size }
+        let fitted = host.sizeThatFits(in: CGSize(width: size.width, height: .greatestFiniteMagnitude))
+        return CGSize(width: size.width, height: min(fitted.height, size.height))
     }
 
     // MARK: - Rendering
 
-    private func render() {
-        switch mode {
-        case .compose:
-            titleLabel.text = "Meet up?"
-            subtitleLabel.text = MeetupState.placeholder.placeName
-            etaLabel.text = "\(MeetupState.placeholder.proposerETAMinutes) min away"
-            actionButton.configuration?.title = "Send Tile"
-            actionButton.isHidden = false
+    private func render(for conversation: MSConversation) {
+        let message = conversation.selectedMessage
+        let tile = message?.url.flatMap(BideTileMessage.init(url:))
+        let role = ParticipantRole(
+            senderIdentifier: message?.senderParticipantIdentifier ?? ParticipantRole.unassignedIdentifier,
+            localIdentifier: conversation.localParticipantIdentifier
+        )
 
-        case .respond(let state, _):
-            titleLabel.text = "Meet at \(state.placeName)?"
-            subtitleLabel.text = state.placeAddress
-            etaLabel.text = "They're \(state.proposerETAMinutes) min away"
-            actionButton.configuration?.title = "Accept"
-            actionButton.isHidden = false
-
-        case .status(let state):
-            titleLabel.text = state.placeName
-            subtitleLabel.text = state.placeAddress
-            switch state.status {
-            case .proposed:
-                etaLabel.text = "Waiting for them to accept…"
-            case .accepted:
-                etaLabel.text = "You're both headed there"
-            }
-            actionButton.isHidden = true
+        if presentationStyle == .transcript {
+            // Drawn by Messages inside the bubble: static, non-interactive,
+            // and never allowed to fetch anything.
+            guard let tile else { return }
+            present(
+                AnyView(
+                    TranscriptView(
+                        tile: tile,
+                        senderName: tile.senderName,
+                        role: role,
+                        localAnswer: answers.answer(for: tile.invite.bideID)
+                    )
+                )
+            )
+            return
         }
 
-        applyLayout(for: presentationStyle)
+        model.present(tile: tile, role: role)
+        present(
+            AnyView(
+                ExtensionRootView(model: model, isExpanded: presentationStyle == .expanded)
+            )
+        )
     }
 
-    private func applyLayout(for presentationStyle: MSMessagesAppPresentationStyle) {
-        switch presentationStyle {
-        case .compact:
-            detailStackView.isHidden = true
-        case .expanded, .transcript:
-            detailStackView.isHidden = false
-        @unknown default:
-            detailStackView.isHidden = true
+    /// Swaps the hosted SwiftUI tree, reusing the hosting controller so the
+    /// view's own state survives a re-render.
+    private func present(_ view: AnyView) {
+        if let host {
+            host.rootView = view
+            return
         }
+
+        let host = UIHostingController(rootView: view)
+        host.view.backgroundColor = .clear
+        addChild(host)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        self.view.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: self.view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+        ])
+        host.didMove(toParent: self)
+        self.host = host
     }
 
     // MARK: - Actions
 
-    @objc private func actionButtonTapped() {
-        switch mode {
-        case .compose:
-            sendTile()
-        case .respond(let state, let session):
-            acceptTile(state, session: session)
-        case .status:
-            break
+    /// Puts a new tile in the input field. An extension may stage a message;
+    /// only the person can send it.
+    private func stage(_ draft: BidePlanDraft) {
+        guard
+            let conversation = activeConversation,
+            let invite = draft.invite()
+        else { return }
+
+        let tile = BideTileMessage(invite: invite, senderName: profile.displayName)
+        // The creator's own answer, so their transcript shows the sent state
+        // rather than an invitation addressed to themselves.
+        answers.record(LocalAnswer(status: .accepted, mode: draft.mode), for: invite.bideID)
+
+        insert(tile, summary: "Meet at \(invite.destinationName)?", into: conversation) { [weak self] in
+            self?.requestPresentationStyle(.compact)
         }
+
+        // The bide itself is created server-side by the container app, which
+        // holds the identity every row-level security policy is written
+        // against. The extension deliberately owns no account of its own.
+        open(tile.appURL(), action: .create, mode: draft.mode)
     }
 
-    private func sendTile() {
-        // A brand new proposal starts a brand new session.
-        insert(MeetupState.placeholder, session: nil)
-    }
-
-    private func acceptTile(_ state: MeetupState, session: MSSession?) {
-        let accepted = MeetupState(
-            id: state.id,
-            placeName: state.placeName,
-            placeAddress: state.placeAddress,
-            latitude: state.latitude,
-            longitude: state.longitude,
-            proposerETAMinutes: state.proposerETAMinutes,
-            accepterETAMinutes: 8, // placeholder until the container app's ETA engine runs
-            status: .accepted
-        )
-        // Accepting reuses the proposer's session so both bubbles thread
-        // together instead of appearing as a new message.
-        insert(accepted, session: session)
-    }
-
-    private func insert(_ state: MeetupState, session: MSSession?) {
+    private func accept(_ tile: BideTileMessage, mode: TravelMode, leaveAt: Date?) {
         guard let conversation = activeConversation else { return }
 
-        let message = MSMessage(session: session ?? MSSession())
-        let layout = MSMessageTemplateLayout()
-        layout.image = tileImage
-        layout.caption = state.placeName
-        layout.subcaption = state.placeAddress
-        layout.trailingCaption = state.status == .accepted
-            ? "Both heading there"
-            : "\(state.proposerETAMinutes) min"
-        message.layout = layout
-        message.url = state.encodedURL()
-        message.summaryText = state.status == .accepted
-            ? "Accepted meetup at \(state.placeName)"
-            : "Proposed meetup at \(state.placeName)"
+        let answered = BideTileMessage(
+            invite: tile.invite,
+            answer: .accepted,
+            leaveAt: leaveAt,
+            senderName: profile.displayName
+        )
+        insert(answered, summary: "On the way to \(tile.invite.destinationName)", into: conversation)
+        open(answered.appURL(), action: .accept, mode: mode)
+    }
 
-        conversation.insert(message) { [weak self] error in
-            if let error {
-                assertionFailure("Failed to insert message: \(error)")
-            }
-            DispatchQueue.main.async {
-                self?.requestPresentationStyle(.compact)
-            }
+    private func decline(_ tile: BideTileMessage) {
+        guard let conversation = activeConversation else { return }
+
+        let answered = BideTileMessage(
+            invite: tile.invite,
+            answer: .declined,
+            senderName: profile.displayName
+        )
+        // No hand-off to the app: declining means there's nothing to track.
+        insert(answered, summary: "Can't make it to \(tile.invite.destinationName)", into: conversation) { [weak self] in
+            self?.requestPresentationStyle(.compact)
         }
     }
 
-    /// Placeholder tile artwork until real map snapshots are wired up.
-    private var tileImage: UIImage {
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 300, height: 200))
-        return renderer.image { _ in
-            UIColor.systemBlue.setFill()
-            UIRectFill(CGRect(x: 0, y: 0, width: 300, height: 200))
+    // MARK: - Messages plumbing
 
-            let symbolConfiguration = UIImage.SymbolConfiguration(pointSize: 64, weight: .medium)
-            guard let pin = UIImage(systemName: "mappin.and.ellipse", withConfiguration: symbolConfiguration)?
-                .withTintColor(.white, renderingMode: .alwaysOriginal)
-            else { return }
-            pin.draw(at: CGPoint(x: (300 - pin.size.width) / 2, y: (200 - pin.size.height) / 2))
+    /// Builds the message and stages it in the input field, keeping the same
+    /// `MSSession` so an answer updates the existing bubble instead of
+    /// stacking a new one under it.
+    private func insert(
+        _ tile: BideTileMessage,
+        summary: String,
+        into conversation: MSConversation,
+        then completion: (() -> Void)? = nil
+    ) {
+        let message = MSMessage(session: conversation.selectedMessage?.session ?? MSSession())
+        message.url = tile.webURL()
+        message.summaryText = summary
+        message.layout = layout(for: tile)
+
+        conversation.insert(message) { error in
+            if let error {
+                assertionFailure("Failed to insert tile: \(error)")
+            }
+            DispatchQueue.main.async { completion?() }
+        }
+    }
+
+    /// A live layout, so the bubble is Bide's own tile rather than a stock
+    /// caption-under-image card. The alternate is what devices without the app
+    /// — and Messages on the Mac — fall back to, so it's rendered from the same
+    /// SwiftUI view rather than being a second design.
+    private func layout(for tile: BideTileMessage) -> MSMessageLayout {
+        let template = MSMessageTemplateLayout()
+        template.image = tileSnapshot(for: tile)
+        template.caption = tile.invite.destinationName
+        template.subcaption = BideFormat.schedule(tile.invite.scheduledFor)
+        return MSMessageLiveLayout(alternateLayout: template)
+    }
+
+    /// Renders the tile to an image for the fallback layout.
+    private func tileSnapshot(for tile: BideTileMessage) -> UIImage? {
+        let view = BideTileView.transcript(
+            invite: tile.invite,
+            senderName: tile.senderName,
+            role: .recipient,
+            answer: tile.answer,
+            leaveAt: tile.leaveAt
+        )
+        .frame(width: 300)
+        .padding(8)
+        .background(BideColor.background)
+
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = UIScreen.main.scale
+        return renderer.uiImage
+    }
+
+    /// What the container app should do once it opens.
+    private enum HandOff: String {
+        case create
+        case accept
+    }
+
+    private func open(_ url: URL, action: HandOff, mode: TravelMode) {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        var items = components.percentEncodedQueryItems ?? []
+        items.append(URLQueryItem(name: "action", value: action.rawValue))
+        items.append(URLQueryItem(name: "mode", value: mode.rawValue))
+        components.percentEncodedQueryItems = items
+
+        guard let handOff = components.url else { return }
+        extensionContext?.open(handOff) { [weak self] opened in
+            guard opened else { return }
+            DispatchQueue.main.async { self?.requestPresentationStyle(.compact) }
         }
     }
 }

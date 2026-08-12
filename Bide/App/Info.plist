@@ -18,13 +18,38 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.trybide.bide</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bide</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Bide can create leave-time reminders for calendar events that have a location. Events are read on this device and nothing is uploaded.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Bide keeps your ETA current while you travel, so the people meeting you know when to leave. Your location stays on this device; only your arrival time is shared.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Bide works out when you should leave. Your location is used on this device to compute travel time and is never sent anywhere — only your arrival time is shared.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

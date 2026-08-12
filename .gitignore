@@ -13,3 +13,9 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# Supabase CLI local state. `.temp` caches the linked project ref and can hold
+# credentials; `.branches` is local-only. Never commit either.
+backend/supabase/.temp/
+backend/supabase/.branches/
+

@@ -14,7 +14,7 @@ knows to leave later.
 - All background work lives in the container app: CoreLocation,
   APNs registration, ActivityKit.
 - App and extension share state via App Group
-  `group.com.yourname.bide`. Never assume shared memory.
+  `group.app.trybide.bide`. Never assume shared memory.
 - ETAs computed on-device via MKDirections. The server receives an
   arrival TIMESTAMP, never a location. This is a privacy commitment.
 
@@ -26,7 +26,13 @@ walking), or every 60s inside the final 5 minutes.
 ## Targets
 - Bide (iOS app, iOS 18+)
 - BideMessages (Messages extension)
-- BideKit (shared Swift package: models, ETA engine, API client)
+- BideWidgets (widget extension: the Live Activity, nothing else)
+- BideKit (shared Swift package, two products)
+  - BideKit: models, ETA engine, API client. No SwiftUI, so it stays
+    testable with `swift test` on macOS.
+  - BideUI: the design system and every view shared by the three
+    targets. Colours, type, and radii live in BideTheme — nothing
+    should name one anywhere else.
 
 ## Build check
 xcodebuild -scheme Bide -destination 'generic/platform=iOS' build

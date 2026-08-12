@@ -1,7 +1,7 @@
 name: Bide
 
 options:
-  bundleIdPrefix: com.yourname.bide
+  bundleIdPrefix: app.trybide.bide
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
@@ -73,9 +73,11 @@ targets:
       - path: Bide/App
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.bide
+        PRODUCT_BUNDLE_IDENTIFIER: app.trybide.bide
         INFOPLIST_FILE: Bide/App/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: Bide/App/Bide.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Bide/App/Info.plist
       properties:
@@ -83,12 +85,39 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-    # App Groups entitlement removed for now — Personal (free) teams can't
-    # provision it. Re-add group.com.yourname.bide once on a paid team
-    # and the app/extension actually need to share state.
+        # ActivityKit. The Live Activity is the surface the product is really
+        # about, and iOS ignores every request without this key.
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        # Location runs in the container app only — never in the extension.
+        # The ETA has to keep counting down with the phone in a pocket, which
+        # is the whole point, so the background mode goes with it.
+        NSLocationWhenInUseUsageDescription:
+          Bide works out when you should leave. Your location is used on this device
+          to compute travel time and is never sent anywhere — only your arrival time
+          is shared.
+        NSLocationAlwaysAndWhenInUseUsageDescription:
+          Bide keeps your ETA current while you travel, so the people meeting you know
+          when to leave. Your location stays on this device; only your arrival time is
+          shared.
+        NSCalendarsFullAccessUsageDescription:
+          Bide can create leave-time reminders for calendar events that have a location.
+          Events are read on this device and nothing is uploaded.
+        UIBackgroundModes:
+          - location
+        # The extension can't run the ETA engine, so accepting a tile opens
+        # the container app with the invite URL. Same scheme BideInvite encodes.
+        CFBundleURLTypes:
+          - CFBundleURLName: app.trybide.bide
+            CFBundleURLSchemes: [bide]
     dependencies:
       - package: BideKit
+        product: BideKit
+      - package: BideKit
+        product: BideUI
       - target: BideMessages
+        embed: true
+      - target: BideWidgets
         embed: true
 
   BideMessages:
@@ -99,10 +128,11 @@ targets:
       - path: BideMessages
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.bide.BideMessages
+        PRODUCT_BUNDLE_IDENTIFIER: app.trybide.bide.BideMessages
         INFOPLIST_FILE: BideMessages/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         SKIP_INSTALL: "YES"
+        CODE_SIGN_ENTITLEMENTS: BideMessages/BideMessages.entitlements
     info:
       path: BideMessages/Info.plist
       properties:
@@ -110,8 +140,43 @@ targets:
         # Required for an .appex. XcodeGen does not emit it for messages
         # extensions; without it the bundle is not a well-formed plug-in.
         CFBundlePackageType: "XPC!"
+        # Foreground only, and only while someone is looking at a tile: the
+        # expanded tile shows "36 minutes from this location". An extension
+        # must never ask for the background kind, and this one doesn't.
+        NSLocationWhenInUseUsageDescription:
+          Bide shows how long it would take you to get there. Your location is used on
+          this device only and is never sent anywhere.
         NSExtension:
           NSExtensionPointIdentifier: com.apple.message-payload-provider
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).MessagesViewController
     dependencies:
       - package: BideKit
+        product: BideKit
+      - package: BideKit
+        product: BideUI
+
+  BideWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: BideWidgets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.trybide.bide.BideWidgets
+        INFOPLIST_FILE: BideWidgets/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: "YES"
+        CODE_SIGN_ENTITLEMENTS: BideWidgets/BideWidgets.entitlements
+    info:
+      path: BideWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Bide
+        CFBundlePackageType: "XPC!"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    dependencies:
+      - package: BideKit
+        product: BideKit
+      - package: BideKit
+        product: BideUI
