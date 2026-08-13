@@ -71,7 +71,6 @@ final class BideAuthProviderTests: XCTestCase {
         let session = try await provider.currentSession()
         XCTAssertEqual(session.userID.uuidString, userID)
         XCTAssertEqual(session.accessToken, "at-1")
-        // Persisted, because losing it means losing the identity entirely.
         XCTAssertEqual(store.loadRefreshToken(), "rt-1")
 
         let requests = await transport.received
@@ -97,7 +96,6 @@ final class BideAuthProviderTests: XCTestCase {
         XCTAssertEqual(requests.count, 1, "a valid token should not be re-fetched")
     }
 
-    /// A stored token from a previous launch is exchanged, not thrown away.
     func testResumesAStoredIdentityOnLaunch() async throws {
         let transport = ScriptedTransport([.init(json: tokenJSON(accessToken: "at-2", refreshToken: "rt-2"))])
         let provider = BideAuthProvider(
@@ -137,21 +135,17 @@ final class BideAuthProviderTests: XCTestCase {
         let first = try await provider.currentSession()
         XCTAssertEqual(first.accessToken, "at-1")
 
-        // Still comfortably valid.
         clock.advance(by: 3000)
         let stillValid = try await provider.currentSession()
         XCTAssertEqual(stillValid.accessToken, "at-1")
 
-        // Inside the renewal margin: swap it out before it can lapse mid-request.
         clock.advance(by: 570)
         let renewed = try await provider.currentSession()
         XCTAssertEqual(renewed.accessToken, "at-2")
     }
 
-    // MARK: The failure that would lose someone's bides
+    // MARK: Credential refresh failure
 
-    /// If the refresh token is genuinely rejected the identity is gone, so a
-    /// fresh anonymous sign-in is the only way forward.
     func testRejectedRefreshTokenFallsBackToANewIdentity() async throws {
         let transport = ScriptedTransport([
             .init(status: 400, json: #"{"error":"invalid_grant","error_description":"Refresh Token Not Found"}"#),
@@ -172,9 +166,6 @@ final class BideAuthProviderTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url?.path() }, ["/auth/v1/token", "/auth/v1/signup"])
     }
 
-    /// But a network failure must NOT do that. Minting a new anonymous identity
-    /// because the user was offline would silently strand every bide they were
-    /// part of, with no email or Apple ID to recover from.
     func testOfflineRefreshDoesNotDiscardTheIdentity() async {
         let store = InMemoryTokenStore(refreshToken: "rt-precious")
         let provider = BideAuthProvider(
@@ -192,7 +183,6 @@ final class BideAuthProviderTests: XCTestCase {
         XCTAssertEqual(store.loadRefreshToken(), "rt-precious", "the identity must survive being offline")
     }
 
-    /// Same reasoning for a server fault.
     func testServerErrorOnRefreshDoesNotDiscardTheIdentity() async {
         let store = InMemoryTokenStore(refreshToken: "rt-precious")
         let provider = BideAuthProvider(
@@ -212,8 +202,6 @@ final class BideAuthProviderTests: XCTestCase {
 
     // MARK: Setup diagnostics
 
-    /// The error you get from a project that hasn't had anonymous sign-ins
-    /// switched on. Worth surfacing verbatim — it names the fix.
     func testAnonymousSignInsDisabledIsReportedClearly() async {
         let provider = BideAuthProvider(
             configuration: configuration,
@@ -231,11 +219,6 @@ final class BideAuthProviderTests: XCTestCase {
         }
     }
 
-    /// The one that cost a debugging session: Apple sign-in against a project
-    /// where the Apple provider was never switched on. GoTrue says so, in as
-    /// many words, with a 400 — and a 400 used to be flattened into
-    /// ``APIError/notAuthenticated``, so the app said "try again" forever while
-    /// the server was naming the toggle that had to be flipped.
     func testAppleProviderDisabledIsReportedClearly() async {
         let provider = BideAuthProvider(
             configuration: configuration,
@@ -259,8 +242,6 @@ final class BideAuthProviderTests: XCTestCase {
         }
     }
 
-    /// The other one: the provider is on, but this bundle ID isn't in its
-    /// Client IDs list, so the token's audience is refused.
     func testAppleAudienceRejectionIsReportedClearly() async {
         let provider = BideAuthProvider(
             configuration: configuration,
@@ -281,8 +262,6 @@ final class BideAuthProviderTests: XCTestCase {
         }
     }
 
-    /// A 400 with nothing to say still means "signed out", so the refresh path
-    /// keeps its meaning even under the new mapping.
     func testUnexplained400StillReadsAsSignedOut() async {
         let provider = BideAuthProvider(
             configuration: configuration,
@@ -296,6 +275,47 @@ final class BideAuthProviderTests: XCTestCase {
         } catch {
             XCTAssertEqual(error, .notAuthenticated)
         }
+    }
+
+    func testDisplayNameCanBeSetAndCleared() async throws {
+        let transport = ScriptedTransport([
+            .init(json: tokenJSON(accessToken: "at-1", refreshToken: "rt-1")),
+            .init(json: "{}"),
+            .init(json: "{}"),
+        ])
+        let provider = BideAuthProvider(
+            configuration: configuration,
+            transport: transport,
+            store: InMemoryTokenStore()
+        )
+
+        _ = try await provider.currentSession()
+        try await provider.record(displayName: "Danny")
+        let namedSession = try await provider.currentSession()
+        XCTAssertEqual(namedSession.displayName, "Danny")
+
+        try await provider.record(displayName: nil)
+        let clearedSession = try await provider.currentSession()
+        XCTAssertNil(clearedSession.displayName)
+
+        let requests = await transport.received
+        XCTAssertEqual(requests.map { $0.url?.path() }, [
+            "/auth/v1/signup", "/auth/v1/user", "/auth/v1/user",
+        ])
+
+        let setBody = try XCTUnwrap(requests[1].httpBody)
+        let setJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: setBody) as? [String: Any]
+        )
+        let setMetadata = try XCTUnwrap(setJSON["data"] as? [String: Any])
+        XCTAssertEqual(setMetadata["full_name"] as? String, "Danny")
+
+        let clearBody = try XCTUnwrap(requests[2].httpBody)
+        let clearJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: clearBody) as? [String: Any]
+        )
+        let clearMetadata = try XCTUnwrap(clearJSON["data"] as? [String: Any])
+        XCTAssertTrue(clearMetadata["full_name"] is NSNull)
     }
 
     func testSignOutForgetsTheIdentity() async throws {
@@ -314,7 +334,6 @@ final class BideAuthProviderTests: XCTestCase {
         await provider.signOut()
         XCTAssertNil(store.loadRefreshToken())
 
-        // The next call starts over with a brand new anonymous user.
         let fresh = try await provider.currentSession()
         XCTAssertEqual(fresh.accessToken, "at-2")
         let requests = await transport.received
@@ -322,7 +341,6 @@ final class BideAuthProviderTests: XCTestCase {
     }
 }
 
-/// A clock the test moves by hand.
 private final class MutableClock: @unchecked Sendable {
     private let lock = NSLock()
     private var current: Date

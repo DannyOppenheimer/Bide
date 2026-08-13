@@ -37,13 +37,9 @@ final class PendingInviteStoreTests: XCTestCase {
         let stored = store.all()
         XCTAssertEqual(stored.count, 1)
         XCTAssertEqual(stored.first?.invite, invite)
-        // The mode matters: it's the answer the sender already gave, and their
-        // session should start with it rather than asking again.
         XCTAssertEqual(stored.first?.mode, .driving)
     }
 
-    /// Sending the same bide twice — a tile re-staged after a false start —
-    /// must not leave two copies to claim.
     func testReStagingTheSameBideReplacesIt() {
         let store = PendingInviteStore(defaults: defaults)
         let invite = makeInvite(scheduledFor: Date().addingTimeInterval(3600))
@@ -70,7 +66,6 @@ final class PendingInviteStoreTests: XCTestCase {
 
     // MARK: Expiry
 
-    /// Somebody answering ten minutes late should still get everyone there.
     func testAnInviteSurvivesShortlyPastItsOwnTime() {
         let store = PendingInviteStore(defaults: defaults)
         let start = Date()
@@ -79,19 +74,15 @@ final class PendingInviteStoreTests: XCTestCase {
         XCTAssertEqual(store.all(now: start.addingTimeInterval(10 * 60)).count, 1)
     }
 
-    /// Somebody answering the next morning should not resurrect it.
     func testAnInviteIsDroppedWellAfterItsOwnTime() {
         let store = PendingInviteStore(defaults: defaults)
         let start = Date()
         store.add(PendingInvite(invite: makeInvite(scheduledFor: start), mode: .walking, stagedAt: start))
 
         XCTAssertTrue(store.all(now: start.addingTimeInterval(3 * 60 * 60)).isEmpty)
-        // Reading is what prunes, so the expired invite is gone for good
-        // rather than being re-judged on every later read.
         XCTAssertTrue(store.isEmpty)
     }
 
-    /// An asap bide has no time of its own to expire against, so it gets a day.
     func testAnAsapInviteExpiresADayAfterItWasSent() {
         let store = PendingInviteStore(defaults: defaults)
         let start = Date()

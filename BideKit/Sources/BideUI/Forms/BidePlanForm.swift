@@ -1,55 +1,61 @@
 import SwiftUI
 import BideKit
 
-/// The form that starts a bide.
-///
-/// One component, two homes: the Messages compose sheet
-/// (`ios-message-thread-send`) and "Create Solo-Bide" on the main page
-/// (`bide-main-page`). They ask for the same things and differ only in wording
-/// and chip emphasis, which is what ``Style`` covers.
+/// Shared form for composing invitations, creating solo bides, and editing plans.
 public struct BidePlanForm: View {
 
     public struct Style: Sendable {
-        /// "Where are we going?" / "Where are you going?"
+        /// Destination prompt.
         public var prompt: String
         public var actionTitle: String
-        /// Solo bides have nobody to arrive alongside, so the choice is hidden.
+        /// Label for the target arrival field.
+        public var timeLabel: String
+        /// Whether to show group arrival coordination choices.
         public var showsArrivalStyle: Bool
         public var chipEmphasis: BideChipEmphasis
 
         public init(
             prompt: String,
             actionTitle: String,
+            timeLabel: String,
             showsArrivalStyle: Bool,
             chipEmphasis: BideChipEmphasis
         ) {
             self.prompt = prompt
             self.actionTitle = actionTitle
+            self.timeLabel = timeLabel
             self.showsArrivalStyle = showsArrivalStyle
             self.chipEmphasis = chipEmphasis
         }
 
-        /// The Messages compose sheet.
-        ///
-        /// Chips are grey here as well as in the app. They were white, which
-        /// made the same control look like two different ones depending on
-        /// which sheet you had opened — and a white chip sits a step away from
-        /// the white Send button below it, so the form read as having two
-        /// primary actions.
+        /// Style for the Messages compose sheet.
         public static let send = Style(
             prompt: "Where are we going?",
             actionTitle: "Send",
+            timeLabel: "Meetup time",
             showsArrivalStyle: true,
             chipEmphasis: .subtle
         )
 
-        /// The app's solo-bide card.
+        /// Style for creating a solo bide in the app.
         public static let solo = Style(
             prompt: "Where are you going?",
             actionTitle: "Save",
+            timeLabel: "Arrival time",
             showsArrivalStyle: false,
             chipEmphasis: .subtle
         )
+
+        /// Style for editing an existing plan. Arrival style is immutable here.
+        public static func editing(isSolo: Bool) -> Style {
+            Style(
+                prompt: isSolo ? "Where are you going?" : "Where are we going?",
+                actionTitle: "Save",
+                timeLabel: isSolo ? "Arrival time" : "Meetup time",
+                showsArrivalStyle: false,
+                chipEmphasis: .subtle
+            )
+        }
     }
 
     @Binding private var draft: BidePlanDraft
@@ -57,6 +63,8 @@ public struct BidePlanForm: View {
     private let search: PlaceSearchService
     private let isBusy: Bool
     private let action: () -> Void
+    /// Optional cancel action used by inline editors.
+    private let cancel: (() -> Void)?
 
     @State private var editingDate = false
     @State private var editingTime = false
@@ -67,12 +75,14 @@ public struct BidePlanForm: View {
         style: Style,
         search: PlaceSearchService,
         isBusy: Bool = false,
+        cancel: (() -> Void)? = nil,
         action: @escaping () -> Void
     ) {
         self._draft = draft
         self.style = style
         self.search = search
         self.isBusy = isBusy
+        self.cancel = cancel
         self.action = action
     }
 
@@ -101,16 +111,24 @@ public struct BidePlanForm: View {
                 arrivalStyle
             }
 
-            Button(action: action) {
-                if isBusy {
-                    ProgressView().tint(BideColor.inverseText)
-                } else {
-                    Text(style.actionTitle)
+            HStack(spacing: 12) {
+                Button(action: action) {
+                    if isBusy {
+                        ProgressView().tint(BideColor.inverseText)
+                    } else {
+                        Text(style.actionTitle)
+                    }
+                }
+                .buttonStyle(.bidePrimary)
+                .disabled(!draft.isComplete || isBusy)
+                .opacity(draft.isComplete ? 1 : 0.4)
+
+                if let cancel {
+                    Button("Cancel", action: cancel)
+                        .buttonStyle(.bideSecondary)
+                        .disabled(isBusy)
                 }
             }
-            .buttonStyle(.bidePrimary)
-            .disabled(!draft.isComplete || isBusy)
-            .opacity(draft.isComplete ? 1 : 0.4)
         }
         .animation(.easeOut(duration: 0.2), value: unavailableMode)
     }
@@ -124,15 +142,14 @@ public struct BidePlanForm: View {
                 BideChip(emphasis: style.chipEmphasis) {
                     editingDate = true
                 } label: {
-                    // No time set is the default and means "leave now", so the
-                    // chips say what that is rather than "ASAP", which named
-                    // the internal state instead of the plan.
+                    // Present an unscheduled plan as its user-facing "Today" value.
                     Text(draft.scheduledFor.map { BideFormat.day($0) } ?? "Today")
                 }
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                BideFieldLabel("Time")
+                // Clarify that this is an arrival time, not a departure time.
+                BideFieldLabel(style.timeLabel)
                 BideChip(emphasis: style.chipEmphasis) {
                     editingTime = true
                 } label: {
@@ -146,7 +163,11 @@ public struct BidePlanForm: View {
             SchedulePicker(scheduledFor: $draft.scheduledFor, components: .date, title: "Date")
         }
         .sheet(isPresented: $editingTime) {
-            SchedulePicker(scheduledFor: $draft.scheduledFor, components: .hourAndMinute, title: "Time")
+            SchedulePicker(
+                scheduledFor: $draft.scheduledFor,
+                components: .hourAndMinute,
+                title: style.timeLabel
+            )
         }
     }
 
@@ -185,8 +206,7 @@ public struct BidePlanForm: View {
     }
 }
 
-/// The native date or time picker, in a sheet, with the way out to "as soon as
-/// everyone can" that the design calls for.
+/// Sheet containing a native date or time picker and an ASAP option.
 private struct SchedulePicker: View {
 
     @Binding var scheduledFor: Date?
@@ -195,12 +215,7 @@ private struct SchedulePicker: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Where the wheel starts when no time has been set yet, captured once so
-    /// it can't drift under the user's finger while they are looking at it.
-    ///
-    /// *Now*, not the next quarter hour. The chip they tapped said "Now", and a
-    /// picker that opens somewhere else has silently changed the plan before
-    /// they touched it.
+    /// Fixed reference time captured when the picker opens.
     @State private var openedAt = Date()
 
     private var selection: Binding<Date> {
@@ -210,18 +225,13 @@ private struct SchedulePicker: View {
         )
     }
 
-    /// Whether the plan is still "leave now".
-    ///
-    /// What the way-out button is offered against. Shown while the answer is
-    /// already now it reads as confirmation; left on screen after somebody has
-    /// picked 6pm tomorrow it reads as a *description* of the plan, and a wrong
-    /// one — which is exactly how it came across.
+    /// Whether the selection still represents an immediate departure.
     private var isEffectivelyNow: Bool {
         guard let scheduledFor else { return true }
         return Calendar.current.isDate(scheduledFor, equalTo: openedAt, toGranularity: .minute)
     }
 
-    /// The two styles are different types, so this can't be a ternary.
+    /// Chooses the platform picker style for the selected components.
     @ViewBuilder
     private var picker: some View {
         if components == .date {
@@ -242,9 +252,7 @@ private struct SchedulePicker: View {
                     .labelsHidden()
                     .tint(BideColor.primaryText)
 
-                // Only while the plan is still "now" — see `isEffectivelyNow`.
-                // Scrolling the wheel back to the current minute brings it
-                // back, so it is never a one-way door.
+                // Show the ASAP option only while the selection remains the current minute.
                 if isEffectivelyNow {
                     Button("Leave now — as soon as everyone can") {
                         scheduledFor = nil
@@ -264,9 +272,7 @@ private struct SchedulePicker: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        // Opening the picker at all means a time was wanted —
-                        // and if they didn't move the wheel, the time they
-                        // wanted is the one it was showing.
+                        // Persist the initially displayed time if the wheel was untouched.
                         if scheduledFor == nil { scheduledFor = openedAt }
                         dismiss()
                     }

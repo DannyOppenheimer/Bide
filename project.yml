@@ -20,11 +20,7 @@ packages:
   BideKit:
     path: BideKit
 
-# Schemes are declared explicitly so debugging the extension is reproducible.
-# Without these, Xcode auto-creates an implicit scheme for BideMessages that
-# tries to launch the .appex as if it were an app (launch substyle 0), which
-# fails with "failed to launch or exited before the debugger could attach".
-# An iMessage extension has to be launched INTO Messages.app — substyle 2.
+# Explicit schemes ensure the iMessage extension launches inside Messages.
 schemes:
   Bide:
     build:
@@ -41,19 +37,13 @@ schemes:
 
   BideMessages:
     build:
-      # The container app has to build too: the .appex is installed on device
-      # only as a payload inside Bide.app.
+      # The extension is installed as a payload of the container app.
       targets:
         BideMessages: all
         Bide: all
     run:
       config: Debug
-      # The runnable must be the .appex, not Bide.app. Substyle 2 is what
-      # tells Xcode to launch it INTO Messages.app rather than as a standalone
-      # process. Xcode will not attach LLDB to an .appex runnable, so the
-      # extension runs without a debugger attached — that is what stops the
-      # "failed to launch or exited before the debugger could attach" error.
-      # For breakpoints in the extension, use Debug > Attach to Process.
+      # Run the .appex inside Messages. Attach manually for extension breakpoints.
       executable: BideMessages
       askForAppToLaunch: true
       launchAutomaticallySubstyle: "2"
@@ -85,13 +75,10 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        # ActivityKit. The Live Activity is the surface the product is really
-        # about, and iOS ignores every request without this key.
+        # Enable Live Activities and frequent content updates.
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
-        # Location runs in the container app only — never in the extension.
-        # The ETA has to keep counting down with the phone in a pocket, which
-        # is the whole point, so the background mode goes with it.
+        # Only the container app performs background ETA tracking.
         NSLocationWhenInUseUsageDescription:
           Bide works out when you should leave. Your location is used on this device
           to compute travel time and is never sent anywhere — only your arrival time
@@ -105,8 +92,7 @@ targets:
           Events are read on this device and nothing is uploaded.
         UIBackgroundModes:
           - location
-        # The extension can't run the ETA engine, so accepting a tile opens
-        # the container app with the invite URL. Same scheme BideInvite encodes.
+        # Custom scheme used for extension-to-app invitation handoff.
         CFBundleURLTypes:
           - CFBundleURLName: app.trybide.bide
             CFBundleURLSchemes: [bide]
@@ -133,22 +119,15 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         SKIP_INSTALL: "YES"
         CODE_SIGN_ENTITLEMENTS: BideMessages/BideMessages.entitlements
-        # The artwork was always in the catalogue; without this it was never
-        # named as the target's icon, so nothing wrote CFBundleIcons into the
-        # .appex and Messages drew its grey placeholder in the app drawer.
-        # The name is the folder's, spaces and all — Xcode's own default for
-        # an iMessage extension.
+        # Name the iMessage icon catalog so Xcode emits extension icon metadata.
         ASSETCATALOG_COMPILER_APPICON_NAME: iMessage App Icon
     info:
       path: BideMessages/Info.plist
       properties:
         CFBundleDisplayName: Bide
-        # Required for an .appex. XcodeGen does not emit it for messages
-        # extensions; without it the bundle is not a well-formed plug-in.
+        # XcodeGen does not emit the required extension package type automatically.
         CFBundlePackageType: "XPC!"
-        # Foreground only, and only while someone is looking at a tile: the
-        # expanded tile shows "36 minutes from this location". An extension
-        # must never ask for the background kind, and this one doesn't.
+        # Used only for a foreground travel-time preview in the expanded tile.
         NSLocationWhenInUseUsageDescription:
           Bide shows how long it would take you to get there. Your location is used on
           this device only and is never sent anywhere.

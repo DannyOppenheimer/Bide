@@ -1,35 +1,34 @@
 import Foundation
 
-/// Where one person stands in a bide.
-///
-/// This replaces the earlier `arrived` boolean: the tile has to distinguish
-/// "hasn't answered yet" from "said no", and a bool can't. Persisted as
-/// `participants.status`.
+/// A participant's current state, persisted as `participants.status`.
 public enum ParticipantStatus: String, Codable, Sendable, CaseIterable {
 
-    /// Sent the tile, or was sent it, and hasn't answered.
+    /// Has not responded to the invitation.
     case invited
 
-    /// In. Their ETA is being tracked.
+    /// Is attending and has an active journey.
     case accepted
 
-    /// Out. Kept rather than deleted so the tile can say so, and so the same
-    /// person can change their mind without a second invite.
+    /// Declined the invitation. The record remains so the response is visible.
     case declined
 
-    /// Made it. When everyone reaches this, the bide is finished.
+    /// Reached the destination.
     case arrived
 
-    /// Whether this person is still expected to turn up — the set the
-    /// countdown, the Live Activity, and the "is everyone here yet" check all
-    /// work from.
+    /// Follows another participant's journey without attending.
+    case watching
+
+    /// Whether the participant is currently travelling to the destination.
     public var isTravelling: Bool {
         switch self {
         case .accepted: true
-        case .invited, .declined, .arrived: false
+        case .invited, .declined, .arrived, .watching: false
         }
     }
 
-    /// Whether we still need an answer from them before the bide can start.
+    /// Whether a response is still pending.
     public var isAwaitingAnswer: Bool { self == .invited }
+
+    /// Whether the participant is following rather than attending.
+    public var isWatching: Bool { self == .watching }
 }

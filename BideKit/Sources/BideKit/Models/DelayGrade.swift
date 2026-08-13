@@ -1,26 +1,21 @@
 import Foundation
 
-/// How far off plan someone has drifted, as the three colours the design uses
-/// for a time.
-///
-/// Graded on *lateness* only. Running early is never coloured as a problem —
-/// arriving before you said you would is the outcome the whole app is trying
-/// to avoid needing, not a fault.
+/// Classifies schedule delay for display. Early arrivals remain on schedule.
 public enum DelayGrade: String, Codable, Sendable, Hashable, CaseIterable {
 
-    /// Within a couple of minutes of the original estimate, or early.
+    /// No more than two minutes late, or early.
     case onSchedule
 
-    /// Slipping: more than 2 minutes late, up to 8.
+    /// More than two and less than eight minutes late.
     case slipping
 
-    /// More than 8 minutes late.
+    /// At least eight minutes late.
     case late
 
-    /// Past this much lateness a time stops being green.
+    /// Delay at which the display changes from on-schedule to slipping.
     public static let slippingThreshold: TimeInterval = 2 * 60
 
-    /// Past this much lateness a time turns red.
+    /// Delay at which the display changes from slipping to late.
     public static let lateThreshold: TimeInterval = 8 * 60
 
     /// - Parameter delay: Seconds later than planned. Negative means early.
@@ -32,11 +27,11 @@ public enum DelayGrade: String, Codable, Sendable, Hashable, CaseIterable {
         }
     }
 
-    /// Grades a live estimate against the estimate it started from.
+    /// Compares a current arrival estimate with its original estimate.
     ///
     /// - Parameters:
-    ///   - projected: What we now think will happen.
-    ///   - planned: What we thought when the bide was anchored.
+    ///   - projected: Current arrival estimate.
+    ///   - planned: Original arrival estimate.
     public init(projected: Date, planned: Date) {
         self.init(delay: projected.timeIntervalSince(planned))
     }

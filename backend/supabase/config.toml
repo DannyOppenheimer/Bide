@@ -5,17 +5,13 @@ enabled = true
 port = 54321
 schemas = ["public"]
 extra_search_path = ["public", "extensions"]
-# A bide has two participants and a handful of rows. Nothing here should ever
-# page.
+# Bides contain small participant sets, so API responses should never need paging.
 max_rows = 200
 
 [db]
 port = 54322
 shadow_port = 54320
-# Supabase's platform went 15 → 17; there was never a hosted Postgres 16, and
-# the CLI refuses the config outright if you name one. This only affects the
-# local stack and the shadow database — pushing to the hosted project doesn't
-# read it — but it has to match the remote or `supabase link` complains.
+# Match the hosted PostgreSQL version so local linking and shadow databases work.
 major_version = 17
 
 [studio]
@@ -29,30 +25,23 @@ port = 54324
 [auth]
 enabled = true
 site_url = "https://trybide.app"
-# Where the tile URL and the extension's hand-off land.
+# Destinations for tile links and the extension-to-app handoff.
 additional_redirect_urls = ["https://trybide.app/meet", "bide://invite"]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 enable_signup = true
 
-# Anonymous sign-ins give every user a real `auth.uid()` — which every RLS
-# policy is written against — without an account. The identity lives in the
-# device keychain and does not survive a reinstall, so link it to Sign in with
-# Apple before shipping.
+# Anonymous auth supplies the `auth.uid()` required by RLS. Its Keychain identity
+# does not survive reinstall, so production accounts must link to Sign in with Apple.
 enable_anonymous_sign_ins = true
 
 [auth.email]
 enable_signup = true
 enable_confirmations = false
 
-# OFF ON PURPOSE — see CLAUDE.md.
-#
-# Delivery is APNs push, handled by the container app. The Messages extension
-# cannot hold a websocket, run in the background, or register for push, so a
-# realtime subscription would only ever work while someone happens to be
-# staring at the app, and would quietly become the thing the feature depends
-# on. Leave this off.
+# Updates use APNs through the container app. The Messages extension cannot
+# maintain a background realtime connection, so realtime must remain disabled.
 [realtime]
 enabled = false
 

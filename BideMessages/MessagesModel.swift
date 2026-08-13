@@ -2,37 +2,35 @@ import Foundation
 import Observation
 import BideKit
 
-/// What the extension is showing, and everything the screens can change.
-///
-/// The view controller owns the Messages framework — conversations, messages,
-/// presentation styles — and this owns the state those screens read and write.
-/// Actions are closures rather than direct calls so the SwiftUI side never
-/// imports `Messages` and can be previewed on its own.
+/// Presentation state and actions for the extension's SwiftUI screens.
+/// Closure-based actions keep the views independent from the Messages framework.
 @MainActor
 @Observable
 final class MessagesModel {
 
     enum Screen: Equatable {
-        /// Nothing selected: offer to start one.
+        /// No selected message; show the compose form.
         case compose
-        /// Nothing selected, and no account to send one with. Sending a tile
-        /// commits this person to something another person is relying on, and
-        /// an identity that dies with the app can't carry that.
+        /// No selected message and no durable account for sending.
         case signInRequired
-        /// Someone else's tile, unanswered.
+        /// An unanswered invitation from another participant.
         case respond(BideTileMessage)
-        /// A tile there's nothing to do about here — your own, or one you've
-        /// already answered.
+        /// Another participant's journey offered for tracking.
+        case track(BideTileMessage)
+        /// The local user's tile or an invitation already answered on this device.
         case status(BideTileMessage, ParticipantRole)
+        /// This conversation already holds an active Bide from this device.
+        case occupied(SentInvite)
     }
 
     var screen: Screen = .compose
     var draft = BidePlanDraft()
-    /// The recipient's own travel mode on the respond screen, which is a
-    /// different choice from the sender's in ``draft``.
+    /// Recipient travel mode, independent from the compose draft's mode.
     var replyMode: TravelMode = .walking
+    /// Opaque key for the open conversation, set by the view controller.
+    @ObservationIgnored var conversationKey: String?
 
-    /// "36 minutes to Nats Park from this location", when location allows it.
+    /// Optional one-shot travel preview for the response screen.
     private(set) var preview: ETAReading?
     private(set) var previewFailed = false
     private(set) var isWorking = false
@@ -42,47 +40,54 @@ final class MessagesModel {
     @ObservationIgnored private let eta: any ETAEngine
     @ObservationIgnored private let store: LocalBideStore
     @ObservationIgnored private let profile: BideProfileStore
+    @ObservationIgnored private let sent: SentInviteStore
     @ObservationIgnored private var previewTask: Task<Void, Never>?
 
-    /// Insert a tile into the conversation. The user still taps send — an
-    /// extension may stage a message, never send one on someone's behalf.
+    /// Stages a tile in the conversation; the user still sends it manually.
     @ObservationIgnored var onCompose: ((BidePlanDraft) -> Void)?
-    /// Accepting needs the container app: location, MKDirections and the
-    /// user's real identity all live there.
+    /// Hands acceptance to the container app for identity and continuous ETA work.
     @ObservationIgnored var onAccept: ((BideTileMessage, TravelMode, Date?) -> Void)?
     @ObservationIgnored var onDecline: ((BideTileMessage) -> Void)?
-    /// Ask Messages for the taller presentation, which the forms need.
+    /// Hands a tracking request to the container app without starting a local ETA.
+    @ObservationIgnored var onTrack: ((BideTileMessage) -> Void)?
+    /// Requests the expanded Messages presentation.
     @ObservationIgnored var onNeedsRoom: (() -> Void)?
-    /// Open the container app, which is the only place an account can be made.
+    /// Opens the container app for account creation.
     @ObservationIgnored var onNeedsAccount: (() -> Void)?
+    /// Opens the container app to manage existing sessions.
+    @ObservationIgnored var onNeedsApp: (() -> Void)?
 
     init(
         eta: any ETAEngine,
         store: LocalBideStore = LocalBideStore(),
-        profile: BideProfileStore = BideProfileStore()
+        profile: BideProfileStore = BideProfileStore(),
+        sent: SentInviteStore = SentInviteStore()
     ) {
         self.eta = eta
         self.store = store
         self.profile = profile
+        self.sent = sent
     }
 
     // MARK: - Screen
 
-    /// Decides what to show for whatever tile Messages handed us.
+    /// Selects the screen for the current tile and participant role.
     func present(tile: BideTileMessage?, role: ParticipantRole) {
         previewTask?.cancel()
         preview = nil
         previewFailed = false
 
         guard let tile else {
-            // Read every time rather than cached: the extension stays alive
-            // across the trip to the app and back, so the answer changes
-            // under it the moment somebody signs in.
-            screen = profile.isSignedInWithApple ? .compose : .signInRequired
+            // Re-read shared auth state because the extension may survive an app round trip.
+            guard profile.isSignedInWithApple else {
+                screen = .signInRequired
+                return
+            }
+            screen = composeScreen()
             return
         }
 
-        // A tile this device has already answered has nothing left to ask.
+        // Show local status instead of presenting the same invitation again.
         if let answered = store.answer(for: tile.invite.bideID) {
             screen = .status(BideTileMessage(invite: tile.invite, answer: answered.status, leaveAt: answered.leaveAt), role)
             return
@@ -90,6 +95,11 @@ final class MessagesModel {
 
         switch role {
         case .recipient:
+            // Tracking does not need the recipient's mode or travel-time preview.
+            if tile.isTrackingInvite {
+                screen = .track(tile)
+                return
+            }
             screen = .respond(tile)
             replyMode = .walking
             startPreview(for: tile.invite.destination)
@@ -98,8 +108,7 @@ final class MessagesModel {
         }
     }
 
-    /// The travel-time line on the respond screen. Best-effort: it needs a
-    /// location fix, and the tile still works without one.
+    /// Starts a best-effort one-shot ETA preview for the response screen.
     func startPreview(for destination: Destination) {
         previewTask?.cancel()
         previewTask = Task { [weak self] in
@@ -121,21 +130,41 @@ final class MessagesModel {
 
     func compose() {
         guard draft.isComplete else { return }
-        // The compose form isn't offered without an account, so this is the
-        // belt to that screen's braces rather than a path anyone takes.
+        // Enforce durable identity even if compose is invoked outside its normal screen.
         guard profile.isSignedInWithApple else {
             onNeedsAccount?()
             return
         }
+        // One Bide per conversation, checked here as well because this is the
+        // call that writes.
+        if let occupying = sent.live(inConversation: conversationKey) {
+            screen = .occupied(occupying)
+            return
+        }
         onCompose?(draft)
+    }
+
+    /// Ends the active Bide in this conversation and returns to the compose form.
+    ///
+    /// The container app performs the deletion; the conversation is released
+    /// here so the replacement can be written without leaving Messages.
+    func endOccupyingBide(_ occupying: SentInvite) {
+        sent.revoke(occupying.bideID)
+        store.clear(occupying.bideID)
+        screen = composeScreen()
+    }
+
+    /// Compose, unless this conversation already holds an active Bide.
+    private func composeScreen() -> Screen {
+        guard let occupying = sent.live(inConversation: conversationKey) else { return .compose }
+        return .occupied(occupying)
     }
 
     func accept(_ tile: BideTileMessage) {
         isWorking = true
         defer { isWorking = false }
 
-        // The departure time is worked out here, while a fresh ETA is in hand,
-        // so the tile in the transcript can count down on its own afterwards.
+        // Store the current departure estimate for a self-updating transcript countdown.
         let leaveAt = departure(for: tile)
         store.record(
             LocalAnswer(status: .accepted, mode: replyMode, leaveAt: leaveAt),
@@ -145,15 +174,33 @@ final class MessagesModel {
         screen = .status(BideTileMessage(invite: tile.invite, answer: .accepted, leaveAt: leaveAt), .sender)
     }
 
+    /// Starts following another participant without recording a local journey.
+    func track(_ tile: BideTileMessage) {
+        isWorking = true
+        defer { isWorking = false }
+
+        onTrack?(tile)
+        screen = .status(
+            BideTileMessage(
+                invite: tile.invite,
+                answer: .watching,
+                senderName: tile.senderName,
+                isTrackingInvite: true
+            ),
+            .sender
+        )
+    }
+
     func decline(_ tile: BideTileMessage) {
         store.record(LocalAnswer(status: .declined, mode: replyMode), for: tile.invite.bideID)
         onDecline?(tile)
         screen = .status(BideTileMessage(invite: tile.invite, answer: .declined), .sender)
     }
 
-    /// When this person has to set off: the agreed time minus their journey,
-    /// or right now for an asap bide.
+    /// Calculates a local departure for fixed-time invitations.
+    /// Arrive-together plans require roster state available only in the container app.
     private func departure(for tile: BideTileMessage) -> Date? {
+        guard tile.invite.arrivalStyle != .together else { return nil }
         guard let travelTime = preview?.travelTime else { return nil }
         guard let scheduled = tile.invite.scheduledFor else { return Date() }
         return scheduled.addingTimeInterval(-travelTime)

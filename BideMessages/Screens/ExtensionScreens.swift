@@ -2,25 +2,15 @@ import SwiftUI
 import BideKit
 import BideUI
 
-/// The extension's root. One model, four screens, and one layout across both
-/// of the heights Messages hands out.
+/// Root view shared by compact and expanded Messages presentations.
 struct ExtensionRootView: View {
 
     @Bindable var model: MessagesModel
-    /// Messages tells us which of its two heights we're in. The drawer shows
-    /// the top of the same screen the full height shows, rather than a
-    /// summary of it.
+    /// Whether Messages has provided its expanded presentation height.
     let isExpanded: Bool
 
     var body: some View {
-        // Anchored to the top by an overlay on a flexible base, not by a frame
-        // alignment. A `.frame(maxHeight: .infinity, alignment: .topLeading)`
-        // only aligns a child *smaller* than the frame; one that is taller
-        // gets centred, and the drawer then showed a band out of the middle of
-        // the form — no mark, no "Where are we going?", no search field, no
-        // Send — which read as an empty grey tray. An overlay's alignment
-        // holds whether the content fits or not, so the top stays the top and
-        // everything past the drawer's height goes off the bottom.
+        // An aligned overlay keeps oversized compact content anchored to the top.
         Color.clear
             .overlay(alignment: .topLeading) { screen }
             .clipped()
@@ -31,9 +21,7 @@ struct ExtensionRootView: View {
 
     private var screen: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Always horizontal. The mark used to unfold from the vertical
-            // form as Messages changed heights, which announced the drawer as
-            // a different screen instead of the top of this one.
+            // Keep the same mark across presentation heights.
             BideMark(.horizontal, dotDiameter: 9)
 
             switch model.screen {
@@ -52,9 +40,21 @@ struct ExtensionRootView: View {
             case .signInRequired:
                 SignInRequiredScreen { model.onNeedsAccount?() }
 
+            case .occupied(let occupying):
+                OccupiedConversationScreen(
+                    occupying: occupying,
+                    openApp: { model.onNeedsApp?() },
+                    end: { model.endOccupyingBide(occupying) }
+                )
+
             case .respond(let tile):
                 expandable("Answer this Bide") {
                     RespondScreen(model: model, tile: tile)
+                }
+
+            case .track(let tile):
+                expandable("Track this Bide") {
+                    TrackScreen(model: model, tile: tile)
                 }
 
             case .status(let tile, let role):
@@ -62,46 +62,24 @@ struct ExtensionRootView: View {
             }
         }
         .padding(BideMetrics.gutter)
-        // The drawer shows as much of the screen as it has room for; the rest
-        // is over the edge rather than squeezed into view. Laying out at the
-        // height the screen wants — rather than the height Messages offered —
-        // is what makes that "over the edge" instead of "compressed".
+        // Preserve the screen's intrinsic height and clip compact overflow.
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    /// A screen that needs the taller presentation, shown at full size in the
-    /// drawer and cut off at the bottom.
-    ///
-    /// The compact state used to be its own small design — a title, a line of
-    /// explanation, and "tap to set up a Bide" — which read as a different
-    /// screen that then became this one. Showing the real thing, clipped, says
-    /// what tapping gets you by simply being it.
-    ///
-    /// **One view, in both heights.** This used to branch on `isExpanded` and
-    /// return two different trees, which is what made tapping the drawer
-    /// cross-fade while swiping it slid: an `if`/`else` gives SwiftUI two
-    /// identities, so changing which branch is live is a remove and an insert,
-    /// and the default transition for that is opacity. Swiping hid it, because
-    /// Messages was dragging the sheet at the same time. Everything that varies
-    /// with height is now a modifier *value* on one view, so there is nothing
-    /// to fade between and both gestures move the same content.
+    /// Uses one view identity at both heights, clipping and disabling the compact
+    /// presentation instead of swapping view trees.
     private func expandable<Content: View>(
         _ label: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        // Laying out at the size it wants is `screen`'s job, which proposes no
-        // height to anything in here — so the form keeps its own and the drawer
-        // crops it, rather than the preview being squashed until it stops
-        // resembling the thing it previews.
+        // Let the form retain its natural height before the drawer clips it.
         content()
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            // Inert in the drawer, and covered by one target that asks for the
-            // room. Half a date picker is not something to let anyone press.
+            // Compact content is one target that requests expansion.
             .allowsHitTesting(isExpanded)
             .overlay {
-                // Invisible either way, so its coming and going is not a
-                // transition anyone can see.
+                // The transparent expansion target has no visible transition.
                 if !isExpanded {
                     Button { model.onNeedsRoom?() } label: {
                         Color.clear.contentShape(Rectangle())
@@ -113,12 +91,7 @@ struct ExtensionRootView: View {
     }
 }
 
-/// The drawer for somebody who hasn't got an account yet.
-///
-/// Sending a tile is the one thing an anonymous identity may not do. The
-/// person on the other end is relying on the sender's ETA for as long as the
-/// meetup lasts, and an identity that can't survive a reinstall can't carry
-/// that. Answering a tile is unaffected — that only commits this device.
+/// Prompts anonymous users to create a durable account before sending.
 struct SignInRequiredScreen: View {
 
     let action: () -> Void
@@ -140,7 +113,43 @@ struct SignInRequiredScreen: View {
     }
 }
 
-/// The expanded tile a recipient answers — `ios-message-thread-expanded`.
+/// Confirms replacement when the conversation already contains an active Bide.
+/// Only one tile may be active per conversation.
+struct OccupiedConversationScreen: View {
+
+    let occupying: SentInvite
+    let openApp: () -> Void
+    let end: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("This chat already has a Bide")
+                .font(BideFont.cardTitle)
+                .foregroundStyle(BideColor.primaryText)
+
+            Text(occupying.destinationName)
+                .font(BideFont.body)
+                .foregroundStyle(BideColor.primaryText)
+
+            Text(BideFormat.schedule(occupying.scheduledFor))
+                .font(BideFont.caption)
+                .foregroundStyle(BideColor.secondaryText)
+
+            Text("Change where or when in the app, or end it here to send a new one. Ending removes everyone who joined or is tracking it.")
+                .font(BideFont.body)
+                .foregroundStyle(BideColor.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Edit it in Bide", action: openApp)
+                .buttonStyle(.bidePrimary)
+
+            Button("End it and start a new one", action: end)
+                .buttonStyle(.bideSecondary)
+        }
+    }
+}
+
+/// Expanded response screen for an invitation recipient.
 struct RespondScreen: View {
 
     @Bindable var model: MessagesModel
@@ -176,8 +185,7 @@ struct RespondScreen: View {
         }
     }
 
-    /// "36 minutes to Nats Park from this location" — or an honest substitute
-    /// when there's no location to measure from.
+    /// Travel preview text with loading and unavailable fallbacks.
     private var travelLine: String {
         if let preview = model.preview {
             return "\(BideFormat.duration(preview.travelTime)) to \(tile.invite.destinationName) from this location"
@@ -189,8 +197,39 @@ struct RespondScreen: View {
     }
 }
 
-/// A tile with nothing left to answer: your own, or one you've already
-/// replied to.
+/// Screen for following another participant's solo journey.
+struct TrackScreen: View {
+
+    @Bindable var model: MessagesModel
+    let tile: BideTileMessage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("\(who) is going to \(tile.invite.destinationName)")
+                .font(BideFont.prompt)
+                .foregroundStyle(BideColor.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(BideFormat.soloSchedule(tile.invite.scheduledFor))
+                .font(BideFont.body)
+                .foregroundStyle(BideColor.primaryText)
+
+            // Clarify that tracking does not create or publish the viewer's journey.
+            Text("You'll see their ETA in your Bides. You're not going along, so nothing of yours is tracked or shared.")
+                .font(BideFont.caption)
+                .foregroundStyle(BideColor.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Start tracking") { model.track(tile) }
+                .buttonStyle(.bidePrimary)
+                .disabled(model.isWorking)
+        }
+    }
+
+    private var who: String { tile.senderName ?? BideFormat.anonymousName }
+}
+
+/// Status for the local user's tile or an invitation already answered.
 struct StatusScreen: View {
 
     let tile: BideTileMessage
@@ -211,11 +250,16 @@ struct StatusScreen: View {
     private var headline: String {
         switch tile.answer {
         case .declined: "You denied this request"
+        case .watching: "You're tracking \(tile.senderName ?? BideFormat.anonymousName)"
         case .accepted, .arrived: "You're going to \(tile.invite.destinationName)"
         case .invited, .none:
-            role.isWaitingOnOtherParticipant
-                ? "Waiting for a reply"
-                : "Meet at \(tile.invite.destinationName)"
+            if tile.isTrackingInvite {
+                "You're going to \(tile.invite.destinationName)"
+            } else {
+                role.isWaitingOnOtherParticipant
+                    ? "Waiting for a reply"
+                    : "Meet at \(tile.invite.destinationName)"
+            }
         }
     }
 
@@ -223,17 +267,20 @@ struct StatusScreen: View {
         switch tile.answer {
         case .declined:
             "They'll see that you can't make it."
+        case .watching:
+            "Their ETA to \(tile.invite.destinationName) is in your Bides. Nothing of yours is shared."
         case .accepted, .arrived:
             tile.leaveAt.map { "Leave at \(BideFormat.time($0)). Bide is tracking your ETA." }
                 ?? "Bide is tracking your ETA."
         case .invited, .none:
-            BideFormat.schedule(tile.invite.scheduledFor)
+            tile.isTrackingInvite
+                ? BideFormat.soloSchedule(tile.invite.scheduledFor)
+                : BideFormat.schedule(tile.invite.scheduledFor)
         }
     }
 }
 
-/// The bubble in the thread. Rendered by Messages in the transcript, where
-/// nothing is interactive and nothing may be fetched.
+/// Static transcript bubble rendered by Messages without external requests.
 struct TranscriptView: View {
 
     let tile: BideTileMessage
@@ -242,15 +289,36 @@ struct TranscriptView: View {
     let localAnswer: LocalAnswer?
 
     var body: some View {
-        BideTileView.transcript(
-            invite: tile.invite,
-            senderName: senderName,
-            role: role,
-            answer: localAnswer?.status ?? tile.answer,
-            leaveAt: localAnswer?.leaveAt ?? tile.leaveAt,
-            mode: localAnswer?.mode
-        )
+        // Redraw only at departure and schedule boundaries so transcript text expires correctly.
+        TimelineView(.explicit(redraws)) { context in
+            BideTileView.transcript(
+                invite: tile.invite,
+                senderName: senderName,
+                role: role,
+                answer: localAnswer?.status ?? tile.answer,
+                leaveAt: localAnswer?.leaveAt ?? tile.leaveAt,
+                mode: localAnswer?.mode,
+                isTrackingInvite: tile.isTrackingInvite,
+                now: context.date
+            )
+        }
         .padding(.horizontal, 2)
         .preferredColorScheme(.dark)
+    }
+
+    /// Explicit redraw dates beginning with now, followed by future departure
+    /// and schedule boundaries.
+    private var redraws: [Date] {
+        let now = Date()
+        let ahead = [
+            localAnswer?.leaveAt ?? tile.leaveAt,
+            tile.invite.scheduledFor,
+            // Redraw at expiry so the tile switches to its collapsed state.
+            tile.invite.endsAt,
+        ]
+            .compactMap { $0 }
+            .filter { $0 > now }
+            .sorted()
+        return [now] + ahead
     }
 }

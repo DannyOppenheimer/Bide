@@ -1,0 +1,13 @@
+# Headers for static routes; /trip and /meet set their own response headers.
+
+/
+  Cache-Control: no-store
+
+# Apple requires this file as JSON over HTTPS without redirects.
+/.well-known/apple-app-site-association
+  Content-Type: application/json
+  Cache-Control: public, max-age=3600
+
+# Shared image used by every invitation preview.
+/og.png
+  Cache-Control: public, max-age=604800

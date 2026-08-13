@@ -18,8 +18,6 @@ final class BideInviteTests: XCTestCase {
         )
     }
 
-    /// Encodes and decodes through *both* wire forms — the public web URL and
-    /// the private app hand-off — asserting the invite comes back identical.
     private func assertRoundTrips(
         _ invite: BideInvite,
         _ message: String = "",
@@ -45,7 +43,6 @@ final class BideInviteTests: XCTestCase {
             "Blue Bottle ☕️",
             "🚲",
             "Pier 39 🌉🦭 sunset",
-            // Multi-scalar clusters: ZWJ sequence, flag, skin-tone modifier.
             "Family 👨‍👩‍👧‍👦 brunch",
             "🇯🇵 Izakaya",
             "Wave 👋🏽 Cafe",
@@ -61,7 +58,6 @@ final class BideInviteTests: XCTestCase {
             "&",
             "&&&",
             "Fish & Chips & Beer",
-            // Looks like query syntax on purpose.
             "A&lat=hijacked",
         ] {
             assertRoundTrips(makeInvite(destinationName: name), name)
@@ -77,9 +73,7 @@ final class BideInviteTests: XCTestCase {
             "Мосты́",
             "北京烤鸭",
             "Ẓāhir",
-            // Right-to-left.
             "مقهى",
-            // Combining marks that normalization could otherwise fold.
             "e\u{0301}clair",
         ] {
             assertRoundTrips(makeInvite(destinationName: name), name)
@@ -145,9 +139,6 @@ final class BideInviteTests: XCTestCase {
 
     // MARK: - Timestamps
 
-    /// `createdAt` must survive encode/decode exactly, including for a `Date`
-    /// straight off the system clock — that is the one that actually ships in
-    /// a tile, and it carries finer precision than a tidy literal does.
     func testRoundTripCreatedAtIsExact() {
         var dates: [Date] = [
             Date(timeIntervalSince1970: 0),
@@ -170,16 +161,12 @@ final class BideInviteTests: XCTestCase {
         }
     }
 
-    /// The initializer snaps `createdAt` to the millisecond the wire carries,
-    /// so an invite always equals its own decoded copy.
     func testInitSnapsCreatedAtToMillisecond() {
         let invite = makeInvite(destinationName: "Now", createdAt: Date(timeIntervalSince1970: 1.0004567))
         XCTAssertEqual(invite.createdAt.timeIntervalSince1970, 1.000, accuracy: 0.0000001)
-        // Idempotent: re-wrapping an already-snapped date changes nothing.
         XCTAssertEqual(makeInvite(destinationName: "Now", createdAt: invite.createdAt).createdAt, invite.createdAt)
     }
 
-    /// A timestamp a person can read, not an opaque epoch offset.
     func testTimestampIsReadableISO8601() {
         let invite = makeInvite(
             destinationName: "Blue Bottle",
@@ -197,7 +184,7 @@ final class BideInviteTests: XCTestCase {
         let url = makeInvite(destinationName: "Blue Bottle Coffee").webURL()
         XCTAssertEqual(url.scheme, "https")
         XCTAssertEqual(url.host, "trybide.app")
-        XCTAssertEqual(url.path, "/meet")
+        XCTAssertEqual(url.path, "/trip")
     }
 
     func testAppURLUsesCustomScheme() {
@@ -206,24 +193,19 @@ final class BideInviteTests: XCTestCase {
         XCTAssertEqual(url.host, "invite")
     }
 
-    /// The recipient may see this URL as raw text, so the destination — the
-    /// only part that means anything to them — comes before the bookkeeping.
     func testDestinationAppearsFirstInTheQuery() {
         let url = makeInvite(destinationName: "Blue Bottle Coffee").webURL()
         XCTAssertTrue(
-            url.absoluteString.hasPrefix("https://trybide.app/meet?to=Blue%20Bottle%20Coffee&"),
+            url.absoluteString.hasPrefix("https://trybide.app/trip?to=Blue%20Bottle%20Coffee&"),
             url.absoluteString
         )
     }
 
-    /// Punctuation that is legal in a query stays legible rather than being
-    /// escaped into noise.
     func testReadablePunctuationIsNotEscaped() {
         let url = makeInvite(destinationName: "Rudy's Bar (Annex), Nob Hill: 3rd!").webURL()
         XCTAssertTrue(url.absoluteString.contains("to=Rudy's%20Bar%20(Annex),%20Nob%20Hill:%203rd!"), url.absoluteString)
     }
 
-    /// A whole realistic invite should still be readable at a glance.
     func testTypicalURLIsLegible() {
         let invite = BideInvite(
             bideID: UUID(uuidString: "8B5C1E7A-4D3F-4C21-9E88-0A1B2C3D4E5F")!,
@@ -234,13 +216,11 @@ final class BideInviteTests: XCTestCase {
         )
         XCTAssertEqual(
             invite.webURL().absoluteString,
-            "https://trybide.app/meet?to=Blue%20Bottle%20Coffee&lat=37.7952&lng=-122.2718"
+            "https://trybide.app/trip?to=Blue%20Bottle%20Coffee&lat=37.7952&lng=-122.2718"
                 + "&style=on_time&t=2025-07-31T22:13:20.125Z&id=8B5C1E7A-4D3F-4C21-9E88-0A1B2C3D4E5F"
         )
     }
 
-    /// An invite with a time carries it in the same readable form, right
-    /// after the coordinates.
     func testScheduledURLIsLegible() {
         let invite = BideInvite(
             bideID: UUID(uuidString: "8B5C1E7A-4D3F-4C21-9E88-0A1B2C3D4E5F")!,
@@ -253,7 +233,7 @@ final class BideInviteTests: XCTestCase {
         )
         XCTAssertEqual(
             invite.webURL().absoluteString,
-            "https://trybide.app/meet?to=Nats%20Park&lat=38.873&lng=-77.007"
+            "https://trybide.app/trip?to=Nats%20Park&lat=38.873&lng=-77.007"
                 + "&at=2025-07-31T22:13:20.000Z&style=together"
                 + "&t=2025-07-31T22:13:20.125Z&id=8B5C1E7A-4D3F-4C21-9E88-0A1B2C3D4E5F"
         )
@@ -261,8 +241,6 @@ final class BideInviteTests: XCTestCase {
 
     // MARK: - Encoding safety
 
-    /// The whole point of escaping `&` and `=`: a hostile place name must not
-    /// be able to inject or overwrite query parameters.
     func testNameCannotInjectQueryParameters() {
         let invite = makeInvite(destinationName: "X&lat=0&lng=0&id=nope")
         let url = invite.webURL()
@@ -273,16 +251,12 @@ final class BideInviteTests: XCTestCase {
         XCTAssertEqual(BideInvite(url: url)?.destinationName, "X&lat=0&lng=0&id=nope")
     }
 
-    /// `URLComponents` leaves `+` unescaped in query values, which a
-    /// form-style decoder reads as a space. We escape it ourselves.
     func testPlusIsPercentEncoded() {
         let url = makeInvite(destinationName: "Coffee + Tea").webURL()
         XCTAssertFalse(url.absoluteString.contains("+"))
         XCTAssertTrue(url.absoluteString.contains("%2B"))
     }
 
-    /// `;` is a parameter separator to some servers, and this URL now reaches
-    /// one.
     func testSemicolonIsPercentEncoded() {
         let url = makeInvite(destinationName: "a;b").webURL()
         XCTAssertTrue(url.absoluteString.contains("%3B"), url.absoluteString)
@@ -300,8 +274,6 @@ final class BideInviteTests: XCTestCase {
         XCTAssertLessThan(makeInvite(destinationName: name).webURL().absoluteString.utf8.count, BideInvite.maxURLByteCount)
     }
 
-    /// Emoji are the worst case: four UTF-8 bytes become twelve percent-encoded
-    /// characters, so a name that looks short can still blow the budget.
     func testLongEmojiNameStaysUnderOneKB() {
         for name in [
             String(repeating: "🚲", count: 5_000),
@@ -320,8 +292,6 @@ final class BideInviteTests: XCTestCase {
         }
     }
 
-    /// Over budget the name is cut, but only on `Character` boundaries — a
-    /// truncated tile should never show half an emoji.
     func testOverBudgetNameIsTruncatedOnCharacterBoundaries() {
         let name = String(repeating: "👨‍👩‍👧‍👦", count: 1_000)
         let invite = makeInvite(destinationName: name)
@@ -332,17 +302,13 @@ final class BideInviteTests: XCTestCase {
         XCTAssertLessThan(decoded.destinationName.count, name.count)
         XCTAssertFalse(decoded.destinationName.isEmpty)
         XCTAssertTrue(name.hasPrefix(decoded.destinationName))
-        // Every surviving cluster is intact, not a severed ZWJ sequence.
         XCTAssertTrue(decoded.destinationName.allSatisfy { $0 == "👨‍👩‍👧‍👦" })
-        // Everything but the name survives truncation untouched.
         XCTAssertEqual(decoded.bideID, invite.bideID)
         XCTAssertEqual(decoded.lat, invite.lat)
         XCTAssertEqual(decoded.lng, invite.lng)
         XCTAssertEqual(decoded.createdAt, invite.createdAt)
     }
 
-    /// A name that fits must not be touched — truncation is a last resort, not
-    /// a routine trim.
     func testNameAtTheEdgeOfTheBudgetIsNotTruncated() {
         let name = String(repeating: "a", count: 800)
         let url = makeInvite(destinationName: name).webURL()
@@ -357,8 +323,6 @@ final class BideInviteTests: XCTestCase {
         let components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
         let allItems = components.percentEncodedQueryItems!
 
-        // Everything that identifies the bide is required. `at` and `style`
-        // are not in this list on purpose — see the test below.
         for dropped in allItems where ["to", "lat", "lng", "t", "id"].contains(dropped.name) {
             var stripped = components
             stripped.percentEncodedQueryItems = allItems.filter { $0.name != dropped.name }
@@ -366,9 +330,6 @@ final class BideInviteTests: XCTestCase {
         }
     }
 
-    /// An asap invite carries no `at` at all, and a tile from a build that
-    /// predates arrival styles carries no `style`. Neither may fail the
-    /// decode: the recipient would see nothing rather than a meetup.
     func testDecodeToleratesAMissingTimeAndStyle() throws {
         let base = makeInvite(destinationName: "Blue Bottle").webURL()
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
@@ -380,7 +341,6 @@ final class BideInviteTests: XCTestCase {
         XCTAssertEqual(decoded.arrivalStyle, .onTime, "the default the design specifies")
     }
 
-    /// A time survives the round trip at the precision the wire format holds.
     func testScheduledTimeRoundTrips() {
         assertRoundTrips(
             BideInvite(
@@ -394,7 +354,7 @@ final class BideInviteTests: XCTestCase {
     }
 
     func testDecodeFailsOnNoQueryAtAll() {
-        XCTAssertNil(BideInvite(url: URL(string: "https://trybide.app/meet")!))
+        XCTAssertNil(BideInvite(url: URL(string: "https://trybide.app/trip")!))
         XCTAssertNil(BideInvite(url: URL(string: "bide://invite")!))
     }
 
@@ -405,16 +365,12 @@ final class BideInviteTests: XCTestCase {
         )!.percentEncodedQuery!
 
         for url in [
-            // Look-alike hosts.
-            "https://trybide.app.evil.com/meet?\(query)",
-            "https://nottrybide.app/meet?\(query)",
-            "https://trybide.com/meet?\(query)",
-            // Right host, wrong page.
+            "https://trybide.app.evil.com/trip?\(query)",
+            "https://nottrybide.app/trip?\(query)",
+            "https://trybide.com/trip?\(query)",
             "https://trybide.app/privacy?\(query)",
             "https://trybide.app/?\(query)",
-            // Downgraded scheme.
-            "http://trybide.app/meet?\(query)",
-            // A future message kind, and the pre-BideInvite wire format.
+            "http://trybide.app/trip?\(query)",
             "bide://accept?\(query)",
             "bide://tile?\(query)",
         ] {
@@ -422,13 +378,21 @@ final class BideInviteTests: XCTestCase {
         }
     }
 
-    /// Hostnames are case-insensitive, and this one may be retyped by hand.
+    func testDecodeStillAcceptsTheLegacyMeetPath() {
+        let invite = makeInvite(destinationName: "Blue Bottle")
+        let query = URLComponents(url: invite.webURL(), resolvingAgainstBaseURL: false)!
+            .percentEncodedQuery!
+
+        XCTAssertEqual(BideInvite(url: URL(string: "https://trybide.app/meet?\(query)")!), invite)
+        XCTAssertFalse(invite.webURL().absoluteString.contains("/meet"))
+    }
+
     func testDecodeAcceptsCaseInsensitiveHost() {
         let query = URLComponents(
             url: makeInvite(destinationName: "Blue Bottle").webURL(),
             resolvingAgainstBaseURL: false
         )!.percentEncodedQuery!
-        XCTAssertNotNil(BideInvite(url: URL(string: "https://TryBide.App/meet?\(query)")!))
+        XCTAssertNotNil(BideInvite(url: URL(string: "https://TryBide.App/trip?\(query)")!))
     }
 
     func testDecodeFailsOnMalformedValues() {
@@ -439,26 +403,19 @@ final class BideInviteTests: XCTestCase {
             "to=Cafe&lat=north&lng=2&t=\(time)&id=\(id)",
             "to=Cafe&lat=1&lng=west&t=\(time)&id=\(id)",
             "to=Cafe&lat=1&lng=2&t=never&id=\(id)",
-            // A date, but not in the format the wire promises.
             "to=Cafe&lat=1&lng=2&t=2025-07-31&id=\(id)",
             "to=Cafe&lat=1&lng=2&t=1754000000&id=\(id)",
-            // Non-finite coordinates would poison MKDirections.
             "to=Cafe&lat=nan&lng=2&t=\(time)&id=\(id)",
             "to=Cafe&lat=1&lng=inf&t=\(time)&id=\(id)",
-            // Escapes that are syntactically valid but decode to invalid
-            // UTF-8: a lone continuation byte, and a truncated sequence.
             "to=%FF&lat=1&lng=2&t=\(time)&id=\(id)",
             "to=%C3%28&lat=1&lng=2&t=\(time)&id=\(id)",
         ] {
-            XCTAssertNil(BideInvite(url: URL(string: "https://trybide.app/meet?\(query)")!), query)
+            XCTAssertNil(BideInvite(url: URL(string: "https://trybide.app/trip?\(query)")!), query)
         }
     }
 
-    /// A stray `%` that isn't a valid escape at all never reaches the decoder:
-    /// `URL(string:)` re-encodes it to `%25` while parsing, so it arrives as a
-    /// literal percent sign rather than failing the decode.
     func testStrayPercentInInboundURLDecodesAsLiteral() {
-        let url = URL(string: "https://trybide.app/meet?to=%E0%A4%A&lat=1&lng=2"
+        let url = URL(string: "https://trybide.app/trip?to=%E0%A4%A&lat=1&lng=2"
             + "&t=2025-07-31T22:13:20.125Z&id=8B5C1E7A-4D3F-4C21-9E88-0A1B2C3D4E5F")!
         XCTAssertEqual(BideInvite(url: url)?.destinationName, "%E0%A4%A")
     }

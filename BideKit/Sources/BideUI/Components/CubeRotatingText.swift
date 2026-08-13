@@ -1,15 +1,9 @@
 import SwiftUI
 
-/// The line under the wordmark, rotating like a face of a cube.
-///
-/// Two faces are on screen at once — the one leaving and the one arriving —
-/// each rotated about the x-axis and pushed out from the centre by half the
-/// cube's depth, which is what makes the edge between them read as a corner
-/// rather than a crossfade.
+/// Rotates between text phrases using two faces of a virtual cube.
 public struct CubeRotatingText: View {
 
-    /// The taglines from the design brief. Shuffled once per launch so the
-    /// same one doesn't always greet you.
+    /// Default taglines, shuffled by the default initializer.
     public static let taglines = [
         "Know when to leave.",
         "You've got more time than you think.",
@@ -22,6 +16,7 @@ public struct CubeRotatingText: View {
         #"The "how far are you" text, automated."#,
         "Because someone always leaves too early.",
         "Coordinate less. Meet on time.",
+        "Get one more scroll in.",
     ]
 
     private let phrases: [String]
@@ -32,8 +27,7 @@ public struct CubeRotatingText: View {
     @State private var index = 0
     @State private var incoming = 1
     @State private var turn: Double = 0
-    /// Measured rather than assumed: the cube's depth has to match the height
-    /// of the text or the faces don't meet at the corner.
+    /// Measured face height, also used as the cube depth.
     @State private var faceHeight: CGFloat = 24
 
     public init(
@@ -55,8 +49,7 @@ public struct CubeRotatingText: View {
         }
         .frame(height: faceHeight)
         .background {
-            // Sizes the cube from the longest phrase so the frame never jumps
-            // mid-rotation.
+            // Reserve enough height to prevent layout changes during rotation.
             Text(phrases.max(by: { $0.count < $1.count }) ?? "")
                 .font(font)
                 .hidden()
@@ -67,8 +60,7 @@ public struct CubeRotatingText: View {
                 }
         }
         .task {
-            // A phrase holds still for `interval`, then turns. Cancelled with
-            // the view, so nothing keeps spinning off-screen.
+            // The task is cancelled automatically when the view disappears.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(interval))
                 guard !Task.isCancelled else { return }
@@ -77,8 +69,7 @@ public struct CubeRotatingText: View {
                 }
                 try? await Task.sleep(for: .seconds(duration))
                 guard !Task.isCancelled else { return }
-                // Land the incoming face on the front and reset, with no
-                // animation so the swap is invisible.
+                // Reset to the incoming face without animating the index swap.
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
@@ -104,7 +95,7 @@ public struct CubeRotatingText: View {
                 anchorZ: -faceHeight / 2,
                 perspective: 0.5
             )
-            // The face swinging away fades out as it turns past the edge.
+            // Hide a face after it rotates past the visible edge.
             .opacity(abs(angle) > 60 ? 0 : 1)
             .animation(.easeInOut(duration: duration), value: angle)
     }

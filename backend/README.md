@@ -28,8 +28,11 @@ run-tests.sh                         applies the migrations to a throwaway Postg
 `participants.status` is `invited` / `accepted` / `declined` / `arrived`. It
 replaced an `arrived` boolean, which could not tell "hasn't answered" from
 "said no" — the distinction the tile in a Messages thread is built around.
-`participants.mode` is constrained to `walking`, `driving`, `transit`: exactly
-the modes the ETA engine can answer for.
+`participants.mode` is constrained to `walking`, `driving`, `cycling`,
+`transit`: exactly the modes the ETA engine can answer for. Cycling is the one
+it does not *route* — MapKit has no cycling transport type, so BideKit asks for
+a walking route and models the ride from its distance. That stays entirely on
+the device; nothing about it reaches this schema.
 
 ### The privacy invariant
 
@@ -47,10 +50,16 @@ or of type `geography`/`geometry`/`point`, ever appears on `participants` or
 
 ## Row-level security
 
-Two rules:
+Three rules:
 
 - **Read a bide only if you're a participant in it.**
 - **Write only your own participant row.**
+- **Edit a bide if you're in it** — where it's going and when it's due, for
+  everybody. A solo bide is the exception: only its creator may move it, since
+  anyone else in one is an audience watching somebody travel. What may change is
+  a column-level `grant update (destination_name, lat, lng, scheduled_for)`, so
+  identity and `arrival_style` are refused by Postgres rather than by a client
+  remembering not to send them.
 
 `anon` has no privileges on any table — every path requires a signed-in user.
 

@@ -1,25 +1,17 @@
 import SwiftUI
 import BideKit
 
-/// The tile as it appears in a Messages thread.
-///
-/// One layout carries every state in the reference screens — a glyph on the
-/// left, one or two centred lines beside it — because they are the same tile
-/// at different moments, and a bubble that changes shape as its status changes
-/// reads as a different message rather than the same one.
+/// A Messages transcript tile that preserves one layout across invitation states.
 public struct BideTileView: View {
 
     private let title: String
     private let subtitle: String?
-    /// The travel mode, once there is a journey to describe. Sits beside the
-    /// countdown rather than in a column of its own — the mark has the top of
-    /// the tile now, and a lone icon out to the left of centred text only made
-    /// the tile look lopsided.
+    /// Travel mode displayed beside an active countdown.
     private let mode: TravelMode?
-    /// A live countdown, when the tile has one — rendered with the system's
-    /// self-updating relative text so it stays honest in the transcript,
-    /// where nothing else is running.
+    /// Departure date rendered with system-updating relative text.
     private let countdownTo: Date?
+    /// Whether the meetup is over and the tile is drawn collapsed.
+    private let isSpent: Bool
 
     public init(
         title: String,
@@ -31,15 +23,42 @@ public struct BideTileView: View {
         self.subtitle = subtitle
         self.mode = mode
         self.countdownTo = countdownTo
+        self.isSpent = false
+    }
+
+    /// Builds a compact expired tile because Messages cannot remove sent bubbles.
+    public init(spent title: String) {
+        self.title = title
+        self.subtitle = nil
+        self.mode = nil
+        self.countdownTo = nil
+        self.isSpent = true
     }
 
     public var body: some View {
+        if isSpent { spent } else { full }
+    }
+
+    private var spent: some View {
+        Text(title)
+            .font(BideFont.caption)
+            .foregroundStyle(BideColor.secondaryText.opacity(0.7))
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 18)
+            // Preserve top clearance for Messages' app badge.
+            .padding(.top, 8 + BideMetrics.tileBadgeClearance)
+            .padding(.bottom, 8)
+            .background(
+                BideColor.background,
+                in: RoundedRectangle(cornerRadius: BideMetrics.tileRadius, style: .continuous)
+            )
+    }
+
+    private var full: some View {
         VStack(spacing: 10) {
-            // The mark, horizontal, on every tile — sent, received, answered.
-            // It used to be the vertical form down the left-hand side, which
-            // existed only as the collapsed half of a morph between the two
-            // forms. With that animation gone it was just a second logo, and
-            // the worse one.
+            // Use the same horizontal mark for every tile state.
             BideMark(.horizontal, dotDiameter: 6)
 
             VStack(spacing: 2) {
@@ -52,7 +71,7 @@ public struct BideTileView: View {
 
                     Group {
                         if let countdownTo {
-                            // "Leave in 5 minutes", kept current by the system.
+                            // The system keeps the relative departure text current.
                             Text("Leave \(Text(countdownTo, style: .relative))")
                         } else {
                             Text(title)
@@ -69,16 +88,12 @@ public struct BideTileView: View {
                 }
             }
             .multilineTextAlignment(.center)
-            // Grow downwards rather than truncate. A bubble in the transcript
-            // is laid out at whatever width Messages decides, which is narrow
-            // enough that "Today · 3:30 PM • Waiting for replies" does not fit
-            // on one line — and half a sentence is worse than two lines.
+            // Allow narrow Messages bubbles to wrap instead of truncating status text.
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 18)
-        // Messages stamps the app's badge over the tile's top-left corner. The
-        // extra top padding is what keeps it off the mark instead of over it.
+        // Extra top padding clears Messages' app badge.
         .padding(.top, 16 + BideMetrics.tileBadgeClearance)
         .padding(.bottom, 16)
         .background(BideColor.background, in: RoundedRectangle(cornerRadius: BideMetrics.tileRadius, style: .continuous))
@@ -87,13 +102,9 @@ public struct BideTileView: View {
 
 extension BideTileView {
 
-    /// Builds the tile for a bide, from what the transcript can actually know:
-    /// the invite in the message URL, who sent it, and whatever answer this
-    /// device has given. There is no server call here — a transcript view is
-    /// rendered by Messages, not by us, and must be cheap.
-    /// - Parameter mode: How this device said it would travel, when it has
-    ///   said. Shown beside the countdown; nil simply leaves it off, which is
-    ///   what the fallback snapshot and anyone else's tile get.
+    /// Builds a transcript tile entirely from URL and local state, without server access.
+    /// - Parameter mode: Local travel mode, shown beside a countdown when available.
+    /// - Parameter isTrackingInvite: Whether the tile offers journey tracking instead of attendance.
     public static func transcript(
         invite: BideInvite,
         senderName: String?,
@@ -101,13 +112,38 @@ extension BideTileView {
         answer: ParticipantStatus?,
         leaveAt: Date? = nil,
         mode: TravelMode? = nil,
+        isTrackingInvite: Bool = false,
         now: Date = Date()
     ) -> BideTileView {
-        let schedule = BideFormat.schedule(invite.scheduledFor, now: now)
+        // Collapse expired invitations regardless of their previous state.
+        if invite.hasEnded(now: now) {
+            return BideTileView(spent: "Bide ended · \(invite.destinationName)")
+        }
+
+        let schedule = isTrackingInvite
+            ? BideFormat.soloSchedule(invite.scheduledFor, now: now)
+            : BideFormat.schedule(invite.scheduledFor, now: now)
+
+        if isTrackingInvite {
+            return tracking(
+                invite: invite,
+                senderName: senderName,
+                role: role,
+                answer: answer,
+                schedule: schedule
+            )
+        }
 
         switch answer {
         case .declined:
             return BideTileView(title: "You denied this request")
+
+        case .watching:
+            // Handle malformed or legacy payloads that attach watching to a regular invite.
+            return BideTileView(
+                title: "You're tracking this Bide",
+                subtitle: schedule
+            )
 
         case .accepted, .arrived:
             if let leaveAt, leaveAt > now {
@@ -137,6 +173,37 @@ extension BideTileView {
                     subtitle: "\(schedule) • Waiting for replies"
                 )
             }
+        }
+    }
+
+    /// Builds a tile offering another participant's solo journey for tracking.
+    private static func tracking(
+        invite: BideInvite,
+        senderName: String?,
+        role: ParticipantRole,
+        answer: ParticipantStatus?,
+        schedule: String
+    ) -> BideTileView {
+        let who = senderName ?? BideFormat.anonymousName
+
+        if answer?.isWatching == true {
+            return BideTileView(
+                title: "You're tracking \(who)",
+                subtitle: "\(schedule) • Their ETA is in your Bides"
+            )
+        }
+
+        switch role {
+        case .recipient:
+            return BideTileView(
+                title: "\(who) is going to \(invite.destinationName)",
+                subtitle: "\(schedule) • Tap to track"
+            )
+        case .sender, .indeterminate:
+            return BideTileView(
+                title: "You're going to \(invite.destinationName)",
+                subtitle: "\(schedule) • Shared so they can follow along"
+            )
         }
     }
 }

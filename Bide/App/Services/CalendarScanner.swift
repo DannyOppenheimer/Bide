@@ -3,17 +3,11 @@ import EventKit
 import Foundation
 import BideKit
 
-/// Turns calendar events that have a location into solo bides.
-///
-/// Opt-in, and off by default: this reads someone's calendar, so it happens
-/// only after they ask for it in Settings. Events without a location are
-/// ignored — there's nothing to route to — and each event is converted at most
-/// once.
+/// Converts opted-in calendar events with locations into solo-bide drafts.
 @MainActor
 final class CalendarScanner {
 
-    /// How far ahead to look. A day is enough for "when do I leave?" and short
-    /// enough that the list stays relevant.
+    /// Future calendar window scanned for candidate events.
     private static let horizon: TimeInterval = 24 * 60 * 60
     private static let convertedKey = "bide.calendar.converted"
 
@@ -29,16 +23,12 @@ final class CalendarScanner {
         EKEventStore.authorizationStatus(for: .event) == .fullAccess
     }
 
-    /// Asks for calendar access. Read-only would be ideal, but EventKit's
-    /// only read grant for querying events is full access.
+    /// Requests full event access because EventKit offers no read-only query grant.
     func requestAccess() async -> Bool {
         (try? await store.requestFullAccessToEvents()) ?? false
     }
 
-    /// Upcoming events with a location, as drafts ready to become solo bides.
-    /// Geocoding is what turns an event's free-text location into somewhere
-    /// routable, and anything that can't be geocoded is skipped rather than
-    /// guessed at.
+    /// Returns unconverted upcoming events whose locations can be resolved.
     func upcomingDrafts(now: Date = Date(), limit: Int = 5) async -> [(eventID: String, draft: BidePlanDraft)] {
         guard isAuthorized else { return [] }
 
@@ -65,8 +55,7 @@ final class CalendarScanner {
         return drafts
     }
 
-    /// Records that an event has become a bide, so a later scan doesn't make
-    /// a second one.
+    /// Marks an event as converted so later scans skip it.
     func markConverted(_ eventID: String) {
         defaults.set(Array(converted.union([eventID])), forKey: Self.convertedKey)
     }
@@ -75,8 +64,7 @@ final class CalendarScanner {
         Set(defaults.stringArray(forKey: Self.convertedKey) ?? [])
     }
 
-    /// Prefers the coordinates EventKit already has; falls back to geocoding
-    /// the location text.
+    /// Uses EventKit coordinates when present, otherwise geocodes the location text.
     private func destination(for event: EKEvent) async -> Destination? {
         let name = event.structuredLocation?.title ?? event.location
         guard let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }

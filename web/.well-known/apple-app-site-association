@@ -1,0 +1,21 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": [
+          "FYL86KHVDH.app.trybide.bide"
+        ],
+        "components": [
+          {
+            "/": "/trip",
+            "comment": "Invite and tracking links. Any query string; the query is the invite."
+          },
+          {
+            "/": "/meet",
+            "comment": "Where invites lived before /trip. Tiles carrying this path are still in transcripts, so they open the app directly rather than bouncing through the browser's redirect."
+          }
+        ]
+      }
+    ]
+  }
+}

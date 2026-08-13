@@ -1,27 +1,20 @@
 import Foundation
 
-/// One person, flattened for the Live Activity.
-///
-/// The activity's payload has a hard size limit and is re-encoded on every
-/// update, so it carries strings that are ready to draw rather than the model
-/// they came from.
+/// Compact, display-ready participant data for a Live Activity payload.
 public struct ActivityParticipant: Codable, Hashable, Identifiable, Sendable {
 
     public let id: UUID
     public let name: String
     public let initial: String
     public let mode: TravelMode
-    /// "Waiting...", "45 minutes", "Arrived".
+    /// Preformatted fallback status text.
     public let line: String
-    /// When this person expects to arrive, if they're on their way.
-    ///
-    /// Carried *as a date* rather than only as the rendered ``line``, because a
-    /// string is right for one instant and the lock screen is looked at at all
-    /// the others. A pre-rendered "10 minutes" is frozen at whatever the app
-    /// last pushed, while the same roster in the app counts down every second —
-    /// which is how the two surfaces came to disagree about the same person by
-    /// a minute. With the date here, both render it live and cannot drift.
+    /// Current journey duration, if applicable.
+    public let travelTime: TimeInterval?
+    /// Arrival date used by the Live Activity to render an updating countdown.
     public let eta: Date?
+    /// Whether the arrival date should count down as a fixed estimate.
+    public let hasDeparted: Bool
     public let grade: DelayGrade?
 
     public init(
@@ -30,7 +23,9 @@ public struct ActivityParticipant: Codable, Hashable, Identifiable, Sendable {
         initial: String,
         mode: TravelMode,
         line: String,
+        travelTime: TimeInterval? = nil,
         eta: Date? = nil,
+        hasDeparted: Bool = false,
         grade: DelayGrade?
     ) {
         self.id = id
@@ -38,12 +33,13 @@ public struct ActivityParticipant: Codable, Hashable, Identifiable, Sendable {
         self.initial = initial
         self.mode = mode
         self.line = line
+        self.travelTime = travelTime
         self.eta = eta
+        self.hasDeparted = hasDeparted
         self.grade = grade
     }
 
-    /// - Parameter me: The local user's id, so their own row on the lock
-    ///   screen reads "You" rather than whatever they called themselves.
+    /// - Parameter me: Local user identifier used to label their row as "You".
     public init(participant: Participant, me: UUID? = nil, now: Date = Date()) {
         self.init(
             id: participant.userID,
@@ -51,55 +47,64 @@ public struct ActivityParticipant: Codable, Hashable, Identifiable, Sendable {
             initial: BideFormat.initial(participant, me: me),
             mode: participant.mode,
             line: BideFormat.participantStatus(participant, now: now),
-            // Only while they're travelling. "Arrived" and "Not coming" are
-            // statements, not countdowns, and `line` already says them.
-            eta: participant.status == .accepted ? participant.etaTimestamp : nil,
+            // Completed and declined participants use their static status line.
+            travelTime: participant.remainingTravel(now: now),
+            eta: participant.status == .accepted ? participant.arrival(now: now) : nil,
+            hasDeparted: participant.hasLeft,
             grade: participant.delayGrade
         )
     }
 }
 
-// ActivityKit is iOS-only: the framework is importable on macOS but every
-// symbol in it is unavailable there, so this is gated on the platform rather
-// than on the import.
+// ActivityKit symbols are unavailable on macOS even when the module can be imported.
 #if os(iOS)
 import ActivityKit
 
-/// The Live Activity — the surface the design brief calls the main event.
-///
-/// Started and updated by the container app only. The Messages extension can't
-/// touch ActivityKit, and doesn't need to: by the time an activity exists, the
-/// app is the thing tracking the ETA.
+/// Static attributes and dynamic content for Bide's Live Activity.
+/// Only the container app starts and updates activities.
 public struct BideActivityAttributes: ActivityAttributes {
 
     public struct ContentState: Codable, Hashable, Sendable {
-        /// "Leave in 10 minutes", "Waiting for everyone to answer".
+        /// Primary status text shown by the activity.
         public var headline: String
         public var participants: [ActivityParticipant]
-        /// When the local user has to set off, if that's known — drives the
-        /// self-updating countdown on the lock screen.
+        /// Local departure time used for the lock-screen countdown; `nil` after departure.
         public var leaveAt: Date?
+        /// Local journey duration shown in the compact Dynamic Island slot.
+        public var myTravelTime: TimeInterval?
+        public var myArrival: Date?
+        /// Whether the local user has departed.
+        public var hasDeparted: Bool
         public var isComplete: Bool
 
         public init(
             headline: String,
             participants: [ActivityParticipant],
             leaveAt: Date? = nil,
+            myTravelTime: TimeInterval? = nil,
+            myArrival: Date? = nil,
+            hasDeparted: Bool = false,
             isComplete: Bool = false
         ) {
             self.headline = headline
             self.participants = participants
             self.leaveAt = leaveAt
+            self.myTravelTime = myTravelTime
+            self.myArrival = myArrival
+            self.hasDeparted = hasDeparted
             self.isComplete = isComplete
         }
     }
 
     public let bideID: UUID
     public let destinationName: String
+    /// Scheduled arrival. Changing it requires replacing the immutable activity.
+    public let scheduledFor: Date?
 
-    public init(bideID: UUID, destinationName: String) {
+    public init(bideID: UUID, destinationName: String, scheduledFor: Date? = nil) {
         self.bideID = bideID
         self.destinationName = destinationName
+        self.scheduledFor = scheduledFor
     }
 }
 #endif

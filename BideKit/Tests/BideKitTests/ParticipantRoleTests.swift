@@ -22,7 +22,6 @@ final class ParticipantRoleTests: XCTestCase {
     }
 
     func testUnsentMessageIsIndeterminate() {
-        // Messages reports an all-zero sender until the message is actually sent.
         let role = ParticipantRole(senderIdentifier: unassigned, localIdentifier: alice)
         XCTAssertEqual(role, .indeterminate)
         XCTAssertFalse(role.showsAcceptButton)
@@ -40,29 +39,20 @@ final class ParticipantRoleTests: XCTestCase {
         )
     }
 
-    /// An unassigned sender must never be read as "someone else sent it" just
-    /// because it differs from the local identifier — that would put an Accept
-    /// button on the local user's own unsent draft.
     func testUnassignedSenderIsNotTreatedAsAnotherParticipant() {
         XCTAssertNotEqual(ParticipantRole(senderIdentifier: unassigned, localIdentifier: alice), .recipient)
     }
 
-    /// Documents the platform limitation this function exists to work around:
-    /// in a conversation with yourself both identifiers are the same, so the
-    /// Accept path is unreachable by self-texting. It is not a bug in the
-    /// comparison — it is why the recipient path is covered here instead.
     func testSelfTextingCannotProduceAnAcceptButton() {
         XCTAssertEqual(ParticipantRole(senderIdentifier: alice, localIdentifier: alice), .sender)
         XCTAssertFalse(ParticipantRole(senderIdentifier: alice, localIdentifier: alice).showsAcceptButton)
     }
 
     func testRoleIsSymmetricAcrossTheTwoParticipants() {
-        // The same message, viewed from each device.
         XCTAssertEqual(ParticipantRole(senderIdentifier: alice, localIdentifier: alice), .sender)
         XCTAssertEqual(ParticipantRole(senderIdentifier: alice, localIdentifier: bob), .recipient)
     }
 
-    /// Group threads: anyone who isn't the local user is "them".
     func testThirdParticipantIsRecipient() {
         let carol = UUID()
         XCTAssertEqual(ParticipantRole(senderIdentifier: carol, localIdentifier: alice), .recipient)

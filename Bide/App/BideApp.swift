@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import BideKit
 import BideUI
@@ -14,9 +15,7 @@ struct BideApp: App {
         _store = State(
             initialValue: BideStore(
                 api: backend.api,
-                // Background location, unlike the Messages extension: an ETA
-                // that freezes when the phone goes in a pocket is worse than
-                // no ETA at all.
+                // Only the container app is entitled to track location in the background.
                 eta: MapKitETAEngine(locations: LocationService(background: true))
             )
         )
@@ -29,14 +28,13 @@ struct BideApp: App {
     }
 }
 
-/// Decides between the sign-in screen and the app, and routes the `bide://`
-/// hand-off from the Messages extension.
+/// Chooses the authenticated root screen and handles incoming invitation links.
 struct RootView: View {
 
     let auth: AuthController
     let store: BideStore
 
-    /// A tile that arrived before there was an identity to act on it with.
+    /// Link deferred until authentication completes.
     @State private var pendingURL: URL?
 
     var body: some View {
@@ -55,12 +53,8 @@ struct RootView: View {
             }
         }
         .task {
-            // Temporary, and the only call site — delete this block with the
-            // file. See design/dev-build-reset.md. It runs before `restore()`
-            // on purpose: it needs the stored token to authenticate the delete,
-            // and it has to finish before anything decides which screen to
-            // show, or a new build flashes the home screen on its way to being
-            // signed out.
+            // Temporary debug reset must run before session restoration.
+            // Remove with `DevBuildReset`; see design/dev-build-reset.md.
             #if DEBUG
             await DevBuildReset.runIfNeeded(auth: auth)
             #endif
@@ -68,14 +62,21 @@ struct RootView: View {
             await auth.restore()
         }
         .onOpenURL { url in
-            // Accepting a tile means "start counting down my ETA", which needs
-            // location, MKDirections, and this app's identity — none of which
-            // the extension has.
-            guard auth.session != nil else {
-                pendingURL = url
-                return
-            }
-            Task { await store.handle(url: url) }
+            receive(url)
         }
+        // Universal Links may arrive as browsing-web user activities.
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            guard let url = activity.webpageURL else { return }
+            receive(url)
+        }
+    }
+
+    private func receive(_ url: URL) {
+        // Defer links until the container app has an authenticated identity.
+        guard auth.session != nil else {
+            pendingURL = url
+            return
+        }
+        Task { await store.handle(url: url) }
     }
 }

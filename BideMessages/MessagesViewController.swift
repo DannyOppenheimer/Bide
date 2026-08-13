@@ -4,29 +4,20 @@ import UIKit
 import BideKit
 import BideUI
 
-/// The Messages extension.
-///
-/// View-only, per CLAUDE.md: no background work, no push, no ActivityKit, and
-/// no writes to Bide's server. It does exactly three things — stage a tile in
-/// the conversation, let a recipient answer one, and draw the tile in the
-/// transcript — and hands anything that needs a real identity or a running ETA
-/// to the container app over `bide://`.
-///
-/// Everything visible is SwiftUI from BideUI, hosted here; this class owns only
-/// the parts that are genuinely `Messages`: conversations, message layouts, and
-/// the compact/expanded/transcript presentation styles.
+/// Hosts SwiftUI screens and integrates them with Messages conversations and layouts.
+/// The extension stages and renders tiles but delegates identity, server writes,
+/// background work, and continuous ETA tracking to the container app.
 final class MessagesViewController: MSMessagesAppViewController {
 
     private let profile = BideProfileStore()
     private let answers = LocalBideStore(defaults: .bideShared)
-    /// Shared with the container app through the App Group, which is how a
-    /// sent tile reaches the app without Messages being left.
+    /// Which conversations already hold a Bide, shared with the container app.
+    private let sent = SentInviteStore()
+    /// Pending invitations shared with the container app through the App Group.
     private let pending = PendingInviteStore()
 
     private lazy var model: MessagesModel = {
-        // Foreground-only location: the tile shows "36 minutes from this
-        // location" while someone is looking at it. An extension must never
-        // ask for the background kind, hence `background: false`.
+        // The extension may request only a foreground, one-shot location estimate.
         let model = MessagesModel(
             eta: MapKitETAEngine(locations: LocationService(background: false)),
             store: answers
@@ -34,8 +25,10 @@ final class MessagesViewController: MSMessagesAppViewController {
         model.onCompose = { [weak self] draft in self?.stage(draft) }
         model.onAccept = { [weak self] tile, mode, leaveAt in self?.accept(tile, mode: mode, leaveAt: leaveAt) }
         model.onDecline = { [weak self] tile in self?.decline(tile) }
+        model.onTrack = { [weak self] tile in self?.track(tile) }
         model.onNeedsRoom = { [weak self] in self?.requestPresentationStyle(.expanded) }
         model.onNeedsAccount = { [weak self] in self?.openApp() }
+        model.onNeedsApp = { [weak self] in self?.openApp() }
         return model
     }()
 
@@ -55,7 +48,7 @@ final class MessagesViewController: MSMessagesAppViewController {
 
     override func didSelect(_ message: MSMessage, conversation: MSConversation) {
         render(for: conversation)
-        // Answering needs room the drawer doesn't have.
+        // Expand the drawer to fit the response form.
         if case .respond = model.screen {
             requestPresentationStyle(.expanded)
         }
@@ -71,8 +64,7 @@ final class MessagesViewController: MSMessagesAppViewController {
         render(for: conversation)
     }
 
-    /// Sizes the bubble in the transcript. Messages asks before laying the
-    /// thread out, so this has to be cheap and deterministic.
+    /// Returns a deterministic transcript bubble size without external work.
     override func contentSizeThatFits(_ size: CGSize) -> CGSize {
         guard presentationStyle == .transcript, let host else { return size }
         let fitted = host.sizeThatFits(in: CGSize(width: size.width, height: .greatestFiniteMagnitude))
@@ -90,8 +82,7 @@ final class MessagesViewController: MSMessagesAppViewController {
         )
 
         if presentationStyle == .transcript {
-            // Drawn by Messages inside the bubble: static, non-interactive,
-            // and never allowed to fetch anything.
+            // Transcript rendering is static and performs no external work.
             guard let tile else { return }
             present(
                 AnyView(
@@ -106,6 +97,7 @@ final class MessagesViewController: MSMessagesAppViewController {
             return
         }
 
+        model.conversationKey = conversation.bideConversationKey
         model.present(tile: tile, role: role)
         present(
             AnyView(
@@ -114,8 +106,7 @@ final class MessagesViewController: MSMessagesAppViewController {
         )
     }
 
-    /// Swaps the hosted SwiftUI tree, reusing the hosting controller so the
-    /// view's own state survives a re-render.
+    /// Reuses the hosting controller while replacing its SwiftUI root view.
     private func present(_ view: AnyView) {
         if let host {
             host.rootView = view
@@ -139,25 +130,15 @@ final class MessagesViewController: MSMessagesAppViewController {
 
     // MARK: - Actions
 
-    /// Puts a new tile in the input field. An extension may stage a message;
-    /// only the person can send it.
-    ///
-    /// **Stays in Messages.** This used to hand off to the container app on
-    /// every send, which threw the user out of the thread they were writing in
-    /// — to look at a screen that, nine times out of ten, had nothing to say to
-    /// them. The hand-off was there for the clash check, and a clash is not
-    /// something a sent tile causes: sending is asking, and nobody has answered
-    /// yet. Recording the invite in the App Group is enough, and the app runs
-    /// the check when it claims one — the moment it becomes a real commitment.
+    /// Stages a new tile in Messages and records it for later app reconciliation.
+    /// The user sends it manually; conflict checks wait until someone accepts.
     private func stage(_ draft: BidePlanDraft) {
         guard
             let conversation = activeConversation,
             let invite = draft.invite()
         else { return }
 
-        // The same rule the compose screen enforces, kept here as well because
-        // this is the line that actually writes something. Sending puts a bide
-        // in someone else's hands and has to outlive this install.
+        // Enforce a durable identity at the point where a tile is staged.
         guard profile.isSignedInWithApple else {
             openApp()
             return
@@ -165,20 +146,24 @@ final class MessagesViewController: MSMessagesAppViewController {
 
         let tile = BideTileMessage(invite: invite, senderName: profile.displayName)
 
-        // Deliberately no local answer for the sender. Sending is asking, not
-        // going: until somebody replies there is nothing to be on the way to,
-        // so their own bubble reads "Waiting for replies" — which is both what
-        // the transcript should say and what the app is actually doing.
+        // Sending an invitation does not yet commit the sender to a journey.
         insert(tile, summary: "Meet at \(invite.destinationName)?", into: conversation) { [weak self] in
             self?.requestPresentationStyle(.compact)
         }
 
-        // The container app picks this up on its next refresh and turns it into
-        // a session once somebody accepts. It holds the identity every
-        // row-level security policy is written against; the extension
-        // deliberately owns no account of its own and writes nothing to the
-        // server.
+        // The container app claims this invitation after a recipient accepts.
         pending.add(PendingInvite(invite: invite, mode: draft.mode))
+
+        // Occupy the conversation, so a second tile cannot be sent to the same
+        // people until this one is ended or expires.
+        sent.record(
+            SentInvite(
+                bideID: invite.bideID,
+                conversationKey: conversation.bideConversationKey,
+                destinationName: invite.destinationName,
+                scheduledFor: invite.scheduledFor
+            )
+        )
     }
 
     private func accept(_ tile: BideTileMessage, mode: TravelMode, leaveAt: Date?) {
@@ -194,9 +179,19 @@ final class MessagesViewController: MSMessagesAppViewController {
         open(answered.appURL(), action: .accept, mode: mode)
     }
 
-    /// Opens the container app so the person can sign in. Nothing is handed
-    /// over — this is a trip to a screen, not a tile — so the URL carries no
-    /// invite and the app treats it as a plain launch.
+    /// Starts following a journey without inserting a watcher response into the thread.
+    private func track(_ tile: BideTileMessage) {
+        let watching = BideTileMessage(
+            invite: tile.invite,
+            answer: .watching,
+            senderName: tile.senderName,
+            isTrackingInvite: true
+        )
+        answers.record(LocalAnswer(status: .watching, mode: .walking), for: tile.invite.bideID)
+        open(watching.appURL(), action: .track, mode: .walking)
+    }
+
+    /// Opens the container app for sign-in without attaching an invitation.
     private func openApp() {
         guard let url = URL(string: "\(BideInvite.appScheme)://") else { return }
         extensionContext?.open(url)
@@ -210,7 +205,7 @@ final class MessagesViewController: MSMessagesAppViewController {
             answer: .declined,
             senderName: profile.displayName
         )
-        // No hand-off to the app: declining means there's nothing to track.
+        // Declining requires no container-app work.
         insert(answered, summary: "Can't make it to \(tile.invite.destinationName)", into: conversation) { [weak self] in
             self?.requestPresentationStyle(.compact)
         }
@@ -218,9 +213,7 @@ final class MessagesViewController: MSMessagesAppViewController {
 
     // MARK: - Messages plumbing
 
-    /// Builds the message and stages it in the input field, keeping the same
-    /// `MSSession` so an answer updates the existing bubble instead of
-    /// stacking a new one under it.
+    /// Stages a message using the current session so replies replace the existing bubble.
     private func insert(
         _ tile: BideTileMessage,
         summary: String,
@@ -240,26 +233,26 @@ final class MessagesViewController: MSMessagesAppViewController {
         }
     }
 
-    /// A live layout, so the bubble is Bide's own tile rather than a stock
-    /// caption-under-image card. The alternate is what devices without the app
-    /// — and Messages on the Mac — fall back to, so it's rendered from the same
-    /// SwiftUI view rather than being a second design.
+    /// Creates a live layout with a snapshot fallback for unsupported devices.
     private func layout(for tile: BideTileMessage) -> MSMessageLayout {
         let template = MSMessageTemplateLayout()
         template.image = tileSnapshot(for: tile)
         template.caption = tile.invite.destinationName
-        template.subcaption = BideFormat.schedule(tile.invite.scheduledFor)
+        template.subcaption = tile.isTrackingInvite
+            ? BideFormat.soloSchedule(tile.invite.scheduledFor)
+            : BideFormat.schedule(tile.invite.scheduledFor)
         return MSMessageLiveLayout(alternateLayout: template)
     }
 
-    /// Renders the tile to an image for the fallback layout.
+    /// Renders the tile snapshot used by the fallback layout.
     private func tileSnapshot(for tile: BideTileMessage) -> UIImage? {
         let view = BideTileView.transcript(
             invite: tile.invite,
             senderName: tile.senderName,
             role: .recipient,
             answer: tile.answer,
-            leaveAt: tile.leaveAt
+            leaveAt: tile.leaveAt,
+            isTrackingInvite: tile.isTrackingInvite
         )
         .frame(width: 300)
         .padding(8)
@@ -270,11 +263,11 @@ final class MessagesViewController: MSMessagesAppViewController {
         return renderer.uiImage
     }
 
-    /// What the container app should do once it opens. Only accepting opens it
-    /// now — sending a tile stays in Messages and leaves the invite in the App
-    /// Group for the app to find.
+    /// Action the container app should perform after handoff.
     private enum HandOff: String {
         case accept
+        /// Joins as a watcher without starting a local ETA.
+        case track
     }
 
     private func open(_ url: URL, action: HandOff, mode: TravelMode) {
@@ -289,5 +282,17 @@ final class MessagesViewController: MSMessagesAppViewController {
             guard opened else { return }
             DispatchQueue.main.async { self?.requestPresentationStyle(.compact) }
         }
+    }
+}
+
+extension MSConversation {
+
+    /// Stable, opaque thread key built from sorted, app-scoped participant IDs.
+    /// Returns an empty key until Messages identifies the recipients.
+    var bideConversationKey: String {
+        remoteParticipantIdentifiers
+            .map(\.uuidString)
+            .sorted()
+            .joined(separator: "+")
     }
 }

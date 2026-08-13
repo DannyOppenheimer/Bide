@@ -34,5 +34,16 @@ walking), or every 60s inside the final 5 minutes.
     targets. Colours, type, and radii live in BideTheme — nothing
     should name one anywhere else.
 
+## The site (trybide.app, Cloudflare Pages)
+- `web/` is the deployed asset root. `functions/` is at the REPO ROOT,
+  not inside `web/` — Pages will not find it there.
+- Invites live at `/trip`, rendered by `functions/trip.js`. It must
+  stay server-rendered: the Messages preview card is built from its
+  Open Graph tags, and nothing runs scripts to make them.
+- `/meet` is the old invite path. Decoded by BideInvite, listed in the
+  AASA, 302'd by `functions/meet.js`, and emitted by nothing.
+- Universal Links open these in the app — see docs/universal-links.md.
+- Deploy: `npx wrangler pages deploy web` from the repo root.
+
 ## Build check
 xcodebuild -scheme Bide -destination 'generic/platform=iOS' build

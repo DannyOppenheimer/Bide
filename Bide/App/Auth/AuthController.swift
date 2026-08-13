@@ -4,22 +4,15 @@ import Foundation
 import Observation
 import BideKit
 
-/// Who the user is, and how they got here.
-///
-/// Two ways in, and the app works either way: Sign in with Apple, or carry on
-/// anonymously. Both end at the same place — a real `auth.uid()` that the
-/// row-level security policies are written against — so nothing downstream has
-/// to care which happened.
+/// Manages anonymous and Apple authentication for a shared `auth.uid()` session.
 @MainActor
 @Observable
 final class AuthController {
 
     private(set) var session: BideSession? {
         didSet {
-            // The Messages extension has no identity of its own and no way to
-            // ask for one, so what it knows about this person's account it
-            // knows from the App Group. Only a real session updates the flag:
-            // a failed restore means "couldn't tell", not "signed out".
+            // Share durable-sign-in state with the identity-free Messages extension.
+            // A failed restore leaves the existing flag unchanged.
             guard let session else { return }
             profile.isSignedInWithApple = !session.isAnonymous
         }
@@ -27,14 +20,15 @@ final class AuthController {
     private(set) var isWorking = false
     private(set) var errorMessage: String?
 
-    /// Whether the user has been past the sign-in screen. Persisted, so
-    /// choosing "use without signing in" isn't a decision they're asked to
-    /// make again on every launch.
+    /// Whether onboarding has completed, including anonymous continuation.
     private(set) var hasOnboarded: Bool {
         didSet { defaults.set(hasOnboarded, forKey: Self.onboardedKey) }
     }
 
     var isSignedInWithApple: Bool { session?.isAnonymous == false }
+
+    /// Display name from account metadata, if available.
+    var accountDisplayName: String? { session?.displayName }
 
     private static let onboardedKey = "bide.onboarded"
 
@@ -43,9 +37,7 @@ final class AuthController {
     private let profile: BideProfileStore
     private let defaults: UserDefaults
 
-    /// The raw nonce for the sign-in currently in flight. Apple echoes its
-    /// SHA-256 back inside the identity token, and Supabase checks the two
-    /// against each other — which is what stops a token being replayed.
+    /// Raw nonce retained while Apple authentication is in progress.
     private var pendingNonce: String?
 
     init(
@@ -61,15 +53,14 @@ final class AuthController {
         self.hasOnboarded = defaults.bool(forKey: Self.onboardedKey)
     }
 
-    /// Restores whatever identity this device already had, without prompting.
+    /// Restores the device's existing identity without prompting.
     func restore() async {
         guard hasOnboarded, session == nil else { return }
         session = try? await auth.currentSession()
+        await reconcileName()
     }
 
-    /// "Use without signing in". Signs in anonymously behind the scenes, since
-    /// every write needs an identity even when the user doesn't want an
-    /// account.
+    /// Creates or restores an anonymous session for unauthenticated use.
     func continueWithoutSigningIn() async {
         await run(describe: { Self.signInFailure($0, fallback: "Couldn't start a Bide session. Try again.") }) {
             self.session = try await self.auth.currentSession()
@@ -79,17 +70,8 @@ final class AuthController {
 
     // MARK: - Sign in with Apple
 
-    /// Called by `SignInWithAppleButton` before the sheet appears.
-    ///
-    /// `.email` is not optional here, however little Bide wants an address:
-    /// Apple only puts an `email` claim in the identity token when it was
-    /// asked for, and Supabase refuses to create a user from a token without
-    /// one — with a 400, which reads to this app as "not signed in". Ask for
-    /// name alone and sign-in fails every time, on a correctly configured
-    /// project, for a reason nothing in the response names.
-    ///
-    /// "Hide My Email" costs nothing: Apple still sends a claim, just a private
-    /// relay address, and nothing here ever sends mail to it.
+    /// Configures Apple authentication with the nonce and scopes Supabase requires.
+    /// Email must be requested so the first identity token can create a Supabase user.
     func configure(_ request: ASAuthorizationAppleIDRequest) {
         let nonce = Self.makeNonce()
         pendingNonce = nonce
@@ -100,7 +82,7 @@ final class AuthController {
     func handle(_ result: Result<ASAuthorization, any Error>) async {
         switch result {
         case .failure(let error):
-            // Tapping "Cancel" is not an error worth shouting about.
+            // User cancellation does not need an error message.
             if (error as? ASAuthorizationError)?.code == .canceled { return }
             errorMessage = "Couldn't sign in with Apple. Try again."
 
@@ -120,18 +102,60 @@ final class AuthController {
                 self.hasOnboarded = true
                 self.pendingNonce = nil
 
-                // Apple hands over a name exactly once, on the very first
-                // authorisation. If it isn't kept now, it is gone.
-                if let name = credential.fullName?.formatted(.name(style: .short)), !name.isEmpty {
-                    self.profile.displayName = name
-                    try? await self.api.updateDisplayName(name)
+                // Persist Apple's one-time name locally, in rosters, and in account metadata.
+                let offered = credential.fullName?.formatted(.name(style: .short))
+                if let offered, !offered.isEmpty, self.profile.displayName == nil {
+                    await self.adopt(name: offered)
                 }
             }
+
+            // Recover the stored account name when Apple no longer supplies one.
+            await reconcileName()
         }
     }
 
-    /// Forgets this device's identity. An anonymous identity cannot be
-    /// recovered afterwards, which is why the settings screen says so.
+    /// Reconciles local and account names without overwriting an existing local choice.
+    private func reconcileName() async {
+        guard let session else { return }
+
+        guard let local = profile.displayName else {
+            if let remote = session.displayName { await adopt(name: remote) }
+            return
+        }
+
+        // Synchronization is best-effort and retries on a later launch.
+        guard session.displayName == nil else { return }
+        try? await api.updateDisplayName(local)
+        await record(local)
+    }
+
+    /// Persists a user-selected name in account metadata.
+    func remember(displayName: String) async {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        await record(trimmed.isEmpty ? nil : trimmed)
+    }
+
+    /// Copies a name to local profile storage, participant rows, and account metadata.
+    private func adopt(name: String) async {
+        profile.displayName = name
+        try? await api.updateDisplayName(name)
+        await record(name)
+    }
+
+    /// Writes account metadata and updates the cached session to match.
+    private func record(_ name: String?) async {
+        try? await auth.record(displayName: name)
+        session = session.map {
+            BideSession(
+                userID: $0.userID,
+                accessToken: $0.accessToken,
+                isAnonymous: $0.isAnonymous,
+                displayName: name
+            )
+        }
+    }
+
+    /// Deletes the local session. Anonymous identities cannot be recovered afterward.
     func signOut() async {
         await auth.signOut()
         session = nil
@@ -139,14 +163,7 @@ final class AuthController {
         profile.isSignedInWithApple = false
     }
 
-    /// Back to the sign-in screen, with the identity left intact.
-    ///
-    /// The way out of "use without signing in" for somebody who has changed
-    /// their mind. Deliberately not ``signOut()``: that throws away the
-    /// refresh token, and for an anonymous user the refresh token *is* the
-    /// account — dropping it here would silently strand every bide they made
-    /// while looking around. Tapping "use without signing in" again lands them
-    /// back on the same identity.
+    /// Returns to onboarding without deleting the recoverable anonymous identity.
     func returnToSignIn() {
         session = nil
         hasOnboarded = false
@@ -171,18 +188,8 @@ final class AuthController {
         }
     }
 
-    /// A failure *during* sign-in reads differently from one after it.
-    /// ``APIError/notAuthenticated`` normally means "your session lapsed", and
-    /// its copy says so — "You're signed out. Sign in to keep sharing your
-    /// ETA" — which as a response to signing in is both baffling and a dead
-    /// end.
-    ///
-    /// Server messages come through verbatim, because the ones that reach this
-    /// path name their own fix: "Provider is not enabled" is a toggle in the
-    /// Supabase dashboard, "Unacceptable audience in id_token" is a bundle ID
-    /// missing from its Client IDs list, "Signups not allowed for this
-    /// instance" is anonymous sign-ins switched off. Every one of those is
-    /// unrecognisable as "try again", which is what they used to say.
+    /// Converts authentication errors to sign-in-specific text while preserving
+    /// actionable Supabase configuration messages.
     private static func signInFailure(_ error: APIError, fallback: String) -> String {
         switch error {
         case .notAuthenticated:
@@ -194,13 +201,11 @@ final class AuthController {
         }
     }
 
-    /// A random, single-use string. Apple requires the request carry its hash;
-    /// Supabase requires the raw value, and compares them.
+    /// Creates a secure single-use nonce whose hash is sent to Apple.
     private static func makeNonce(length: Int = 32) -> String {
         var bytes = [UInt8](repeating: 0, count: length)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            // Cannot proceed with a predictable nonce: that's the whole point
-            // of it, and a weak one silently weakens sign-in.
+            // Authentication cannot safely continue without secure randomness.
             preconditionFailure("SecRandomCopyBytes failed — no secure randomness available")
         }
         return bytes.map { String(format: "%02x", $0) }.joined()

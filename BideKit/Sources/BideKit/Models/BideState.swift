@@ -1,23 +1,20 @@
 import Foundation
 
-/// One person's standing in a bide.
-///
-/// Carries an arrival *timestamp* and nothing else about where they are. There
-/// is no location here because there is no location column in the database —
-/// see the privacy invariant at the top of the schema migration.
+/// One participant's state. It stores an arrival estimate, never their location.
 public struct Participant: Codable, Equatable, Sendable, Identifiable {
 
     public let userID: UUID
-    /// What they call themselves. Nil for someone who never signed in and
-    /// never set one; the UI falls back to a placeholder rather than inventing
-    /// a name.
+    /// User-provided display name, or `nil` if none is set.
     public let displayName: String?
     public let mode: TravelMode
-    /// When they expect to arrive. Null until their first ETA is anchored.
+    /// Anchored arrival estimate. It becomes fixed only after ``leftAt`` is set.
     public let etaTimestamp: Date?
-    /// The first ETA we ever recorded for them. Everything later is graded
-    /// against this to decide whether a time shows green, yellow, or red.
+    /// Initial arrival estimate used to grade later delays.
     public let baselineETA: Date?
+    /// Most recently measured journey duration. This is not location data.
+    public let travelTime: TimeInterval?
+    /// Time the device detected departure from its private, on-device origin.
+    public let leftAt: Date?
     public let status: ParticipantStatus
     public let updatedAt: Date
 
@@ -29,6 +26,8 @@ public struct Participant: Codable, Equatable, Sendable, Identifiable {
         mode: TravelMode,
         etaTimestamp: Date? = nil,
         baselineETA: Date? = nil,
+        travelTime: TimeInterval? = nil,
+        leftAt: Date? = nil,
         status: ParticipantStatus = .invited,
         updatedAt: Date = Date()
     ) {
@@ -37,6 +36,8 @@ public struct Participant: Codable, Equatable, Sendable, Identifiable {
         self.mode = mode
         self.etaTimestamp = etaTimestamp
         self.baselineETA = baselineETA
+        self.travelTime = travelTime
+        self.leftAt = leftAt
         self.status = status
         self.updatedAt = updatedAt
     }
@@ -47,36 +48,56 @@ public struct Participant: Codable, Equatable, Sendable, Identifiable {
         case mode
         case etaTimestamp = "eta_timestamp"
         case baselineETA = "baseline_eta"
+        case travelTime = "travel_seconds"
+        case leftAt = "left_at"
         case status
         case updatedAt = "updated_at"
     }
 
-    /// Whether they have set off. Someone who has accepted but whose ETA
-    /// hasn't been anchored yet is still at home — that's the "Waiting..."
-    /// state on the tile and in the Live Activity.
-    public var hasLeft: Bool { status == .accepted && etaTimestamp != nil }
+    /// Whether an attending participant has departed.
+    public var hasLeft: Bool { status.isTravelling && leftAt != nil }
 
-    /// How this person's current estimate compares with the one they started
-    /// from. Nil until there are both to compare.
+    /// Current journey duration, including a fallback for rows created before
+    /// `travel_seconds` was added.
+    public var journey: TimeInterval? {
+        if let travelTime { return max(0, travelTime) }
+        guard let etaTimestamp else { return nil }
+        return max(0, etaTimestamp.timeIntervalSince(updatedAt))
+    }
+
+    /// Expected arrival at `now`. Before departure, it remains relative to the clock.
+    public func arrival(now: Date = Date()) -> Date? {
+        guard status.isTravelling else { return nil }
+        if hasLeft { return etaTimestamp }
+        return journey.map { now.addingTimeInterval($0) }
+    }
+
+    /// Remaining duration, counting down only after departure.
+    public func remainingTravel(now: Date = Date()) -> TimeInterval? {
+        guard status.isTravelling else { return nil }
+        if hasLeft, let etaTimestamp { return max(0, etaTimestamp.timeIntervalSince(now)) }
+        return journey
+    }
+
+    /// Delay relative to the baseline ETA. Delay grading begins after departure.
     public var delayGrade: DelayGrade? {
         guard let etaTimestamp, let baselineETA else { return nil }
+        guard hasLeft || status == .arrived else { return .onSchedule }
         return DelayGrade(projected: etaTimestamp, planned: baselineETA)
     }
 }
 
-/// A bide and everyone in it — what the container app renders and what the ETA
-/// engine works from.
+/// A bide and its participant state.
 public struct BideState: Codable, Equatable, Sendable, Identifiable {
 
     public let bideID: UUID
     public let destinationName: String
     public let lat: Double
     public let lng: Double
-    /// When everyone is due. Nil for an asap bide.
+    /// Target arrival time, or `nil` for an ASAP bide.
     public let scheduledFor: Date?
     public let arrivalStyle: ArrivalStyle
-    /// A bide with an audience rather than participants: the creator is going
-    /// somewhere, and anyone else in it is only watching.
+    /// Whether non-creators follow the creator instead of attending.
     public let isSolo: Bool
     public let createdAt: Date
     public let createdBy: UUID
@@ -121,8 +142,7 @@ public struct BideState: Codable, Equatable, Sendable, Identifiable {
         case participants
     }
 
-    /// A row fetched without its embedded participants still decodes, as an
-    /// empty roster rather than a failure.
+    /// Decodes missing embedded participants as an empty list.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         bideID = try container.decode(UUID.self, forKey: .bideID)
@@ -140,7 +160,7 @@ public struct BideState: Codable, Equatable, Sendable, Identifiable {
 
 extension BideState {
 
-    /// The shareable form of this bide — the tile URL model.
+    /// The invitation data used to build a shareable tile URL.
     public var invite: BideInvite {
         BideInvite(
             bideID: bideID,
@@ -157,81 +177,75 @@ extension BideState {
         participants.first { $0.userID == userID }
     }
 
-    /// Everyone but you — in a two-person bide, the person you're meeting.
+    /// Returns every participant except the specified user.
     public func participants(besides userID: UUID) -> [Participant] {
         participants.filter { $0.userID != userID }
     }
 
-    /// Everyone still expected to turn up.
+    /// Participants currently travelling to the destination.
     public var travellers: [Participant] {
         participants.filter { $0.status.isTravelling }
     }
 
-    /// Whether anyone still owes an answer. The bide holds off starting until
-    /// this is false — or until the furthest person has to leave, whichever
-    /// comes first.
+    /// Participants shown in attendee rosters, excluding declines and watchers.
+    public var roster: [Participant] {
+        participants.filter { $0.status != .declined && !$0.status.isWatching }
+    }
+
+    /// Participants following the journey without attending.
+    public var watchers: [Participant] {
+        participants.filter { $0.status.isWatching }
+    }
+
+    /// Whether the specified user follows the journey without attending.
+    public func isWatching(_ userID: UUID?) -> Bool {
+        guard let userID else { return false }
+        return participant(userID)?.status.isWatching == true
+    }
+
+    /// Whether any invitation remains unanswered.
     public var isAwaitingAnswers: Bool {
         participants.contains { $0.status.isAwaitingAnswer }
     }
 
-    /// True once everyone who said yes has arrived, which is what retires the
-    /// tile and ends the Live Activity.
+    /// Whether every roster participant has arrived. Watchers do not affect completion.
     public var isComplete: Bool {
-        let answered = participants.filter { $0.status != .declined }
+        let answered = roster
         return !answered.isEmpty && answered.allSatisfy { $0.status == .arrived }
     }
 
-    /// How long a bide outlives the moment it was aiming for.
-    ///
-    /// ``isComplete`` is the tidy ending, and most bides never reach it: it
-    /// needs every single person to be marked `arrived`, which only happens if
-    /// their app was open and tracking when they got there. People put the
-    /// phone in a pocket instead. So without a second, duller ending, a bide is
-    /// forever — last Tuesday's dinner is still on the home screen, and worse,
-    /// it is still what `reconcileTracking` picks, so the app holds a location
-    /// subscription open for a meetup nobody is going to.
-    ///
-    /// Six hours, measured from the agreed time — or from creation for an asap
-    /// bide, which has no other clock. Long enough that a table booked for 7pm
-    /// is still live at midnight; short enough that nothing survives the night.
+    /// Maximum lifetime after the scheduled time, or creation time for ASAP bides.
     public static let lifetime: TimeInterval = 6 * 60 * 60
 
-    /// Whether this bide is over by the clock rather than by anyone saying so.
-    ///
-    /// A bide scheduled for next week is not expired — the interval is
-    /// negative — so this only ever retires the past.
+    /// Whether the bide has exceeded its lifetime.
     public func isExpired(now: Date = Date()) -> Bool {
         now.timeIntervalSince(scheduledFor ?? createdAt) > Self.lifetime
     }
 
-    /// The person with the longest journey still ahead of them. In an
-    /// ``ArrivalStyle/together`` bide this is who everyone else waits on.
+    /// Returns the traveller with the latest projected arrival.
     public func furthestTraveller(now: Date = Date()) -> Participant? {
         travellers
-            .filter { $0.etaTimestamp != nil }
-            .max { ($0.etaTimestamp ?? now) < ($1.etaTimestamp ?? now) }
+            .filter { $0.arrival(now: now) != nil }
+            .max { ($0.arrival(now: now) ?? now) < ($1.arrival(now: now) ?? now) }
     }
 
-    /// When this bide is aiming for: the time that was agreed, or — for an
-    /// asap bide — the latest ETA among the people still travelling.
+    /// Returns the scheduled arrival or latest traveller arrival for an ASAP bide.
     public func targetArrival(now: Date = Date()) -> Date? {
-        scheduledFor ?? furthestTraveller(now: now)?.etaTimestamp
+        scheduledFor ?? furthestTraveller(now: now)?.arrival(now: now)
     }
 
-    /// The slice of the day this bide occupies for `userID`, used to spot a
-    /// clash with another bide. Nil until there's enough to compute one.
+    /// Returns the user's occupied travel window, if an arrival can be calculated.
     public func travelWindow(for userID: UUID, now: Date = Date()) -> TravelWindow? {
         guard let arrival = targetArrival(now: now) else { return nil }
-        guard let participant = participant(userID), let eta = participant.etaTimestamp else {
-            // No ETA of their own yet: treat the journey as instantaneous so
-            // the bide still occupies its arrival moment.
+        guard let travelTime = participant(userID)?.remainingTravel(now: now) else {
+            // Without a personal ETA, reserve the shared arrival instant.
             return TravelWindow(leaveAt: arrival, arriveAt: arrival)
         }
-        return TravelWindow(arriveAt: arrival, travelTime: eta.timeIntervalSince(now))
+        return TravelWindow(arriveAt: arrival, travelTime: travelTime)
     }
 
     public var conflictCandidate: ScheduleConflict.Candidate? {
         guard let window = travelWindow(for: createdBy) else { return nil }
-        return ScheduleConflict.Candidate(id: bideID, destinationName: destinationName, window: window)
+        return ScheduleConflict.Candidate(id: bideID, destination: destination, window: window)
     }
 }

@@ -1,56 +1,77 @@
 import Foundation
 
-/// What a bide is asking of one person right now.
+/// The current timing instructions for one participant.
 public struct BidePlan: Equatable, Sendable {
 
-    /// When everyone is aiming to be there.
+    /// Shared target arrival time.
     public let targetArrival: Date?
-    /// When *this* person should set off. Nil until there's an ETA to work
-    /// back from.
+    /// Local departure time, or `nil` while unavailable or held back.
     public let departure: Date?
-    /// True when the answer is "not yet": an arrive-together bide where the
-    /// person with the longest journey hasn't set off, so telling anyone else
-    /// to leave would only make them wait at the other end.
+    /// Whether this participant must wait for the longest traveller to leave.
     public let isHeldBack: Bool
-    /// Who everyone is waiting on, when they're being held back.
+    /// The participant whose departure currently gates this plan.
     public let waitingOn: Participant?
+    /// Most recent travel-time estimate for this participant.
+    public let travelTime: TimeInterval?
+    /// Expected arrival. Before departure, this remains relative to the current time.
+    public let arrival: Date?
+    /// Whether the participant has left the departure area.
+    public let hasDeparted: Bool
+    /// Whether the participant has arrived.
+    public let hasArrived: Bool
 
     public init(
         targetArrival: Date?,
         departure: Date?,
         isHeldBack: Bool = false,
-        waitingOn: Participant? = nil
+        waitingOn: Participant? = nil,
+        travelTime: TimeInterval? = nil,
+        arrival: Date? = nil,
+        hasDeparted: Bool = false,
+        hasArrived: Bool = false
     ) {
         self.targetArrival = targetArrival
         self.departure = departure
         self.isHeldBack = isHeldBack
         self.waitingOn = waitingOn
+        self.travelTime = travelTime
+        self.arrival = arrival
+        self.hasDeparted = hasDeparted
+        self.hasArrived = hasArrived
     }
 }
 
-/// Turns a bide plus one person's travel time into "leave at".
-///
-/// Pure and separate from the engine, because this is the product's central
-/// claim — that Bide knows when *you* should leave — and it should be provable
-/// without a device, a network, or a clock that moves.
+/// Calculates one participant's departure and arrival plan from shared state.
+/// An available ETA does not imply departure; movement is tracked separately.
 public enum BidePlanner {
 
     /// - Parameters:
-    ///   - myTravelTime: How long this person's journey takes right now, from
-    ///     the on-device ETA engine. Nil if it hasn't been anchored yet.
+    ///   - myTravelTime: Current on-device travel estimate, if available.
+    ///   - hasDeparted: Local departure state, which may be newer than the server value.
     public static func plan(
         for state: BideState,
         me: UUID,
         myTravelTime: TimeInterval?,
+        hasDeparted: Bool = false,
         now: Date = Date()
     ) -> BidePlan {
+        let mine = state.participant(me)
+        let departed = hasDeparted || mine?.hasLeft == true
+        let hasArrived = mine?.status == .arrived
+
+        // After departure the server ETA is fixed; before departure it moves with `now`.
+        let myArrival: Date?
+        if departed, let eta = mine?.etaTimestamp {
+            myArrival = eta
+        } else {
+            myArrival = myTravelTime.map { now.addingTimeInterval($0) }
+        }
+
         let others = state.participants(besides: me).filter { $0.status.isTravelling }
 
-        // What everyone is aiming for. An agreed time wins; otherwise it's the
-        // longest journey among the people going, which is the only arrival
-        // time everyone can actually make.
+        // Use the scheduled time, or derive an ASAP target from the longest journey.
         let longestOtherJourney = others
-            .compactMap { $0.etaTimestamp?.timeIntervalSince(now) }
+            .compactMap { $0.arrival(now: now)?.timeIntervalSince(now) }
             .max()
         let target: Date?
         if let scheduled = state.scheduledFor {
@@ -63,29 +84,94 @@ public enum BidePlanner {
 
         let departure = zip(target, myTravelTime).map { $0.addingTimeInterval(-$1) }
 
-        // Arrive-together: nobody moves until the furthest person does. "Has
-        // left" is the presence of an ETA — the engine only produces one once
-        // it's tracking someone in motion.
+        func plan(
+            targetArrival: Date?,
+            departure: Date?,
+            isHeldBack: Bool = false,
+            waitingOn: Participant? = nil
+        ) -> BidePlan {
+            BidePlan(
+                targetArrival: targetArrival,
+                departure: departure,
+                isHeldBack: isHeldBack,
+                waitingOn: waitingOn,
+                travelTime: myTravelTime,
+                arrival: myArrival,
+                hasDeparted: departed,
+                hasArrived: hasArrived
+            )
+        }
+
         guard state.arrivalStyle == .together else {
-            return BidePlan(targetArrival: target, departure: departure)
+            return plan(targetArrival: target, departure: departure)
         }
 
-        let furthest = others.max { lhs, rhs in
-            (lhs.etaTimestamp ?? .distantPast) < (rhs.etaTimestamp ?? .distantPast)
+        // MARK: Arrive together
+        // Hold departures until every traveller has an estimate and the longest
+        // traveller leaves. Their projected arrival then becomes the shared target.
+        if let unestimated = others.first(where: { $0.arrival(now: now) == nil }) {
+            return plan(
+                targetArrival: target,
+                departure: nil,
+                isHeldBack: !departed,
+                waitingOn: unestimated
+            )
         }
-        let waitingOn = others.first { !$0.hasLeft }
 
-        return BidePlan(
-            targetArrival: target,
-            departure: departure,
-            isHeldBack: waitingOn != nil,
-            waitingOn: waitingOn ?? furthest
+        guard
+            let furthest = others.max(by: { lhs, rhs in
+                (lhs.arrival(now: now) ?? .distantPast) < (rhs.arrival(now: now) ?? .distantPast)
+            }),
+            let furthestArrival = furthest.arrival(now: now)
+        else {
+            // With no other traveller, use the ordinary departure plan.
+            return plan(targetArrival: target, departure: departure)
+        }
+
+        guard furthest.hasLeft else {
+            // The local participant may leave first if their journey is at least as long.
+            if let myArrival, myArrival >= furthestArrival {
+                return plan(targetArrival: target, departure: departure)
+            }
+            return plan(
+                targetArrival: target,
+                departure: nil,
+                isHeldBack: !departed,
+                waitingOn: furthest
+            )
+        }
+
+        // Work each departure backward from the longest traveller's projected arrival.
+        return plan(
+            targetArrival: furthestArrival,
+            departure: myTravelTime.map { furthestArrival.addingTimeInterval(-$0) }
         )
     }
 
-    /// The one line the card, the tile, and the Live Activity all lead with.
+    /// Builds a watcher headline about the traveller instead of the local user.
+    public static func watcherHeadline(for state: BideState, now: Date = Date()) -> String {
+        guard let traveller = state.travellers.first ?? state.roster.first else {
+            // The card remains visible until the next refresh removes it.
+            return "Nobody is going any more"
+        }
+
+        let who = BideFormat.name(traveller)
+        switch traveller.status {
+        case .arrived: return "\(who) is there"
+        case .declined, .watching, .invited: return "\(who) hasn't set off"
+        case .accepted:
+            guard traveller.hasLeft else { return "\(who) hasn't left yet" }
+            guard let arrival = traveller.arrival(now: now) else { return "\(who) is on the way" }
+            return "\(who) arrives at \(BideFormat.time(arrival))"
+        }
+    }
+
+    /// Builds the primary status line shared by cards, tiles, and Live Activities.
     public static func headline(for plan: BidePlan, state: BideState, now: Date = Date()) -> String {
         if state.isComplete { return "Everyone's here" }
+        if plan.hasArrived { return "You're here" }
+        // Departure instructions are no longer relevant once travel begins.
+        if plan.hasDeparted { return "On the way" }
 
         if plan.isHeldBack, let waitingOn = plan.waitingOn {
             return "Waiting for \(BideFormat.name(waitingOn)) to leave"
@@ -96,15 +182,13 @@ public enum BidePlanner {
         if state.isAwaitingAnswers {
             return "Waiting for everyone to answer"
         }
-        // Deliberately not "Heading to <place>". Every surface that shows this
-        // line now shows the destination beside it, so naming it here printed
-        // it twice; this says the thing the destination can't, which is that
-        // everybody has said yes and nobody has moved.
+        // No estimate is available yet.
+        if state.isSolo { return "Working out when to leave" }
+        // The destination is already displayed beside this status.
         return "Nobody has set off yet"
     }
 
-    /// `max` over two optionals, where nil means "no opinion" rather than
-    /// "zero" — a participant without an ETA must not drag the target down.
+    /// Returns the greater available value without treating `nil` as zero.
     private static func max(_ lhs: TimeInterval?, _ rhs: TimeInterval?) -> TimeInterval? {
         switch (lhs, rhs) {
         case (let lhs?, let rhs?): Swift.max(lhs, rhs)
@@ -115,7 +199,7 @@ public enum BidePlanner {
     }
 }
 
-/// `zip` for optionals — both present, or nothing.
+/// Combines two optional values only when both are present.
 private func zip<A, B>(_ lhs: A?, _ rhs: B?) -> (A, B)? {
     guard let lhs, let rhs else { return nil }
     return (lhs, rhs)

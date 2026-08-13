@@ -1,48 +1,30 @@
 import Foundation
 
-/// Who the local user is, relative to a tile in the conversation.
-///
-/// This is what decides whether the extension shows "Waiting for them" or an
-/// Accept button. The decision is pure — it takes the two identifiers as
-/// parameters rather than reaching for `MSMessage` / `MSConversation` — so it
-/// can be tested without a device and without a second iCloud account.
-///
-/// It matters that this is testable off-device: a message you send to
-/// *yourself* reports the same identifier for sender and local participant, so
-/// self-texting always looks like ``sender`` and can never produce an Accept
-/// button. Verifying the recipient path by texting yourself gives a false
-/// result; the unit tests are the real check.
+/// The local user's role relative to a Messages tile.
 public enum ParticipantRole: String, Codable, Equatable, Sendable {
 
-    /// The local user sent this tile. They're waiting on the other person.
+    /// The local user sent the tile.
     case sender
 
-    /// Someone else sent this tile. The local user can accept it.
+    /// Another participant sent the tile.
     case recipient
 
-    /// Neither — an identifier was missing. Messages reports an all-zero
-    /// identifier for a message that has been composed but not yet sent, so
-    /// this is the state of a tile staged in the input field.
+    /// Messages has not assigned one or both participant identifiers yet.
     case indeterminate
 }
 
 extension ParticipantRole {
 
-    /// The identifier Messages reports when a participant isn't assigned yet,
-    /// e.g. a message the local user has composed but not sent. Public because
-    /// the extension needs it as the stand-in when there is no selected
-    /// message at all.
+    /// The all-zero identifier Messages uses before assigning a participant.
     public static let unassignedIdentifier = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
 
-    /// Decides the local user's role by comparing a message's sender against
-    /// the conversation's local participant.
+    /// Determines the local user's role from Messages participant identifiers.
     ///
     /// - Parameters:
     ///   - senderIdentifier: `MSMessage.senderParticipantIdentifier`.
     ///   - localIdentifier: `MSConversation.localParticipantIdentifier`.
     ///
-    /// Pass the raw identifiers straight through — do not pre-filter them.
-    /// Handling the unassigned case is this function's job.
+    /// Pass raw identifiers so this initializer can handle unassigned values.
     public init(senderIdentifier: UUID, localIdentifier: UUID) {
         guard
             senderIdentifier != Self.unassignedIdentifier,
@@ -54,10 +36,9 @@ extension ParticipantRole {
         self = senderIdentifier == localIdentifier ? .sender : .recipient
     }
 
-    /// Whether the extension should offer an Accept button for this tile.
+    /// Whether the extension should show the Accept button.
     public var showsAcceptButton: Bool { self == .recipient }
 
-    /// Whether the extension should tell the local user it's on the other
-    /// person now.
+    /// Whether the extension is waiting for another participant to respond.
     public var isWaitingOnOtherParticipant: Bool { self == .sender }
 }

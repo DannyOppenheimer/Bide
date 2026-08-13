@@ -2,40 +2,31 @@ import Foundation
 import Observation
 import BideKit
 
-/// The app's one piece of shared state, and the only place that decides what
-/// Bide does next.
-///
-/// It owns the loop the whole product rests on: anchor an ETA on-device,
-/// publish the arrival *timestamp*, refresh everyone else's, and keep the Live
-/// Activity saying the right thing. Nothing else in the app talks to the ETA
-/// engine or to the server.
+/// Coordinates server state, on-device ETA tracking, and Live Activity updates.
 @MainActor
 @Observable
 final class BideStore {
 
-    /// A clash the user has to agree to before it happens.
+    /// A schedule conflict requiring user confirmation.
     struct ConflictPrompt: Identifiable {
         let id = UUID()
         let message: String
-        /// The bides they'd be dropped from.
+        /// IDs of bides the user will leave if they continue.
         let losing: [UUID]
-        /// What to do if they say yes.
+        /// Work to run after confirmation.
         let proceed: () async -> Void
     }
 
     private(set) var bides: [BideState] = []
-    private(set) var isLoading = false
     private(set) var errorMessage: String?
-    /// The bide currently being tracked — at most one, because a person can
-    /// only be going to one place at a time.
+    /// Bides served by the active ETA route. Same-destination bides share one reading.
+    private(set) var trackedBideIDs: Set<UUID> = []
+    /// The bide the engine is anchored on: the soonest of ``trackedBideIDs``,
+    /// whose destination and travel mode define the measured route.
     private(set) var trackedBideID: UUID?
     var conflict: ConflictPrompt?
 
-    /// How often the app re-reads everyone else's ETAs while it's open.
-    ///
-    /// Polling, not sockets: the backend has realtime off on purpose, and the
-    /// push path that replaces this needs an APNs key that isn't wired up yet.
-    /// Foreground-only, so it costs nothing when the app isn't on screen.
+    /// Foreground polling interval while realtime and remote push updates are unavailable.
     private static let refreshInterval: Duration = .seconds(30)
 
     private let api: any BideAPI
@@ -44,25 +35,36 @@ final class BideStore {
     private let profile: BideProfileStore
     private let answers: LocalBideStore
     private let pending: PendingInviteStore
+    private let sent: SentInviteStore
 
-    /// Who the local user is, so a roster can tell their row from everyone
-    /// else's. Nil until ``start(userID:)``.
+    /// Local user identifier, set by ``start(userID:)``.
     private(set) var userID: UUID?
     private var refreshTask: Task<Void, Never>?
-    /// The ETA we first recorded for this bide, which every later one is
-    /// graded against for the green/yellow/red colouring.
+    /// Initial arrival estimates used to grade later delays.
     private var baseline: [UUID: Date] = [:]
+    /// Latest local ETA reading for each bide, which may be newer than server state.
+    private var readings: [UUID: ETAReading] = [:]
+    /// First recorded departure time for each bide; never reset during a journey.
+    private var departures: [UUID: Date] = [:]
 
-    /// `activities` is optional rather than defaulted: a default argument is
-    /// evaluated outside the actor, and `LiveActivityController` is
-    /// main-actor bound.
+    /// Immutable plan values used to detect edits that require tracking restart.
+    private struct TrackingPlan: Equatable {
+        let destination: Destination
+        let scheduledFor: Date?
+        let mode: TravelMode
+    }
+
+    private var trackedPlan: TrackingPlan?
+
+    /// `activities` is optional because default arguments are evaluated outside actor isolation.
     init(
         api: any BideAPI,
         eta: any ETAEngine,
         activities: LiveActivityController? = nil,
         profile: BideProfileStore = BideProfileStore(),
         answers: LocalBideStore = LocalBideStore(defaults: .bideShared),
-        pending: PendingInviteStore = PendingInviteStore()
+        pending: PendingInviteStore = PendingInviteStore(),
+        sent: SentInviteStore = SentInviteStore()
     ) {
         self.api = api
         self.eta = eta
@@ -70,6 +72,7 @@ final class BideStore {
         self.profile = profile
         self.answers = answers
         self.pending = pending
+        self.sent = sent
     }
 
     // MARK: - Session
@@ -90,54 +93,67 @@ final class BideStore {
         refreshTask = nil
         eta.stopTracking()
         trackedBideID = nil
+        trackedBideIDs = []
+        trackedPlan = nil
     }
 
     // MARK: - Reading
 
     func refresh() async {
         guard userID != nil else { return }
-        isLoading = bides.isEmpty
+
+        await applyRevocations()
 
         do {
-            // Two endings, and a bide needs only one of them. `isComplete` is
-            // the tidy one and most bides never reach it, because it takes
-            // everybody's app being open at the far end; `isExpired` is the
-            // clock running out, which is what actually retires them. Filtered
-            // here rather than in the query so the rule is one line of Swift
-            // that the tests can read.
+            // Retire bides either through explicit completion or time-based expiry.
             let now = Date()
             bides = try await api.fetchMyBides().filter { !$0.isComplete && !$0.isExpired(now: now) }
+            adoptRecordedDepartures()
             errorMessage = nil
             reconcileTracking()
         } catch let error as APIError {
-            errorMessage = error.errorDescription
+            // Internal cancellation should not be presented as a network failure.
+            if !error.isCancellation { errorMessage = error.errorDescription }
+        } catch is CancellationError {
+            // Task cancellation is expected during teardown.
         } catch {
             errorMessage = "Couldn't reach Bide."
         }
 
         await claimPendingInvites()
-        isLoading = false
     }
 
-    /// This person's plan for a bide: target arrival, when to leave, and
-    /// whether they're being held back.
+    /// Calculates the local user's current plan for a bide.
     func plan(for state: BideState, now: Date = Date()) -> BidePlan {
         guard let userID else {
             return BidePlan(targetArrival: state.scheduledFor, departure: nil)
         }
-        let myTravelTime = state.participant(userID)?.etaTimestamp?.timeIntervalSince(now)
-        return BidePlanner.plan(for: state, me: userID, myTravelTime: myTravelTime, now: now)
+
+        // Prefer current local measurements and fall back to server state.
+        let reading = readings[state.bideID]
+        let mine = state.participant(userID)
+        let myTravelTime = reading?.travelTime ?? mine?.journey
+        let hasDeparted = reading?.hasDeparted == true || departures[state.bideID] != nil
+
+        return BidePlanner.plan(
+            for: state,
+            me: userID,
+            myTravelTime: myTravelTime,
+            hasDeparted: hasDeparted,
+            now: now
+        )
     }
 
     func headline(for state: BideState, now: Date = Date()) -> String {
-        BidePlanner.headline(for: plan(for: state, now: now), state: state, now: now)
+        guard !state.isWatching(userID) else {
+            return BidePlanner.watcherHeadline(for: state, now: now)
+        }
+        return BidePlanner.headline(for: plan(for: state, now: now), state: state, now: now)
     }
 
     // MARK: - Writing
 
-    /// Creates a bide from a draft — the app's own solo composer, or the
-    /// calendar. A bide sent to other people goes through ``stage(_:mode:)``
-    /// instead, and isn't created until somebody answers it.
+    /// Creates a bide from an in-app or calendar draft.
     func create(_ draft: BidePlanDraft, isSolo: Bool) async {
         guard let invite = draft.invite() else { return }
         await withConflictCheck(for: invite, mode: draft.mode) { [weak self] in
@@ -151,12 +167,12 @@ final class BideStore {
         }
     }
 
-    /// Accepting a tile handed over by the Messages extension.
+    /// Accepts a tile handed off by the Messages extension.
     func accept(_ tile: BideTileMessage, mode: TravelMode) async {
         await withConflictCheck(for: tile.invite, mode: mode) { [weak self] in
             guard let self else { return }
             await perform {
-                // Idempotent server-side: accepting twice refreshes the mode.
+                // Repeated acceptance safely updates the travel mode.
                 let state = try await self.join(tile.invite, mode: mode)
                 try await self.nameMyselfIfNeeded()
                 self.merge(state)
@@ -165,8 +181,7 @@ final class BideStore {
         }
     }
 
-    /// Saves the name locally — the extension reads it from the App Group when
-    /// composing a tile — and pushes it to every participant row.
+    /// Saves the display name in shared storage and participant rows.
     func updateDisplayName(_ name: String) async {
         profile.displayName = name
         await perform {
@@ -175,39 +190,173 @@ final class BideStore {
         }
     }
 
-    /// Joins a bide, creating it first if nobody has yet.
-    ///
-    /// The sender's tile is staged in Messages before their own app has had a
-    /// chance to write the bide to the server — and they might never open it,
-    /// or be offline when they do. The invite URL carries everything the row
-    /// needs, so whoever reaches the server first materialises it. Without
-    /// this, a recipient who is quick off the mark gets "that meetup is no
-    /// longer available" for a tile they are looking at.
+    /// Joins an existing bide or creates it from the invitation if no participant has yet.
     private func join(_ invite: BideInvite, mode: TravelMode) async throws(APIError) -> BideState {
         do {
             return try await api.joinBide(bideID: invite.bideID, mode: mode, status: .accepted)
         } catch APIError.notFound {
-            // `create_bide` adds the caller as an accepted participant, so
-            // this both creates and joins.
+            // `create_bide` atomically creates the bide and accepts for the caller.
             return try await api.createBide(invite, mode: mode, isSolo: false)
         }
     }
 
-    func leave(_ bideID: UUID) async {
+    /// Whether the local user may edit the plan under the server's ownership rules.
+    func canEdit(_ state: BideState) -> Bool {
+        guard let userID, !state.isWatching(userID) else { return false }
+        return state.isSolo ? state.createdBy == userID : true
+    }
+
+    /// Whether the local user follows this bide without attending.
+    func isWatching(_ state: BideState) -> Bool { state.isWatching(userID) }
+
+    /// Whether the local user can share their own solo journey for tracking.
+    func canShare(_ state: BideState) -> Bool {
+        guard let userID else { return false }
+        return state.isSolo && state.createdBy == userID
+    }
+
+    /// Builds a URL that joins the recipient as a watcher.
+    func trackingLink(for state: BideState) -> URL {
+        BideTileMessage(
+            invite: state.invite,
+            senderName: profile.displayName,
+            isTrackingInvite: true
+        ).webURL()
+    }
+
+    /// Returns the removal label appropriate to watcher, solo-owner, or attendee state.
+    func leaveTitle(for state: BideState) -> String {
+        if isWatching(state) { return "Stop tracking" }
+        if state.isSolo, state.createdBy == userID { return "Delete this Bide" }
+        return "Leave this Bide"
+    }
+
+    /// Updates shared plan fields and the local participant's travel mode.
+    func edit(
+        _ bideID: UUID,
+        destination: Destination,
+        scheduledFor: Date?,
+        mode: TravelMode
+    ) async {
+        guard let existing = bides.first(where: { $0.bideID == bideID }) else { return }
+        let me = userID.flatMap { existing.participant($0) }
+        let myStatus = me?.status ?? .accepted
+
         await perform {
-            try await self.api.leaveBide(bideID: bideID)
-            self.bides.removeAll { $0.bideID == bideID }
-            self.answers.clear(bideID)
-            self.activities.end(bideID: bideID)
-            if self.trackedBideID == bideID {
-                self.eta.stopTracking()
-                self.trackedBideID = nil
+            var state = existing
+
+            if destination != existing.destination || scheduledFor != existing.scheduledFor {
+                state = try await self.api.updateBide(
+                    bideID: bideID,
+                    destination: destination,
+                    scheduledFor: scheduledFor
+                )
             }
+
+            if mode != me?.mode {
+                // Update mode through the idempotent join path without clearing ETA fields.
+                state = try await self.api.joinBide(bideID: bideID, mode: mode, status: myStatus)
+            }
+
+            self.forgetJourney(for: bideID)
+            self.merge(state)
             self.reconcileTracking()
         }
     }
 
-    /// Handles the `bide://` hand-off from the Messages extension.
+    /// Clears route-dependent readings after a plan edit while preserving departure state.
+    private func forgetJourney(for bideID: UUID) {
+        baseline[bideID] = nil
+        readings[bideID] = nil
+
+        // Clear tracking identity so reconciliation starts a route for the new plan.
+        guard trackedBideID == bideID else { return }
+        eta.stopTracking()
+        activities.end(bideID: bideID)
+        trackedBideID = nil
+        trackedPlan = nil
+    }
+
+    /// Joins another participant's trip as a watcher without starting an ETA.
+    func watch(_ tile: BideTileMessage) async {
+        await perform {
+            let state = try await self.api.joinBide(
+                bideID: tile.invite.bideID,
+                mode: .walking,
+                status: .watching
+            )
+            self.merge(state)
+            // Ensure the newly watched bide does not replace the active journey.
+            self.reconcileTracking()
+        }
+    }
+
+    /// Deletes a caller-owned solo bide, or removes only the caller from any other bide.
+    func leave(_ bideID: UUID) async {
+        let mine = bides.first { $0.bideID == bideID }
+        let isMySoloBide = mine.map { $0.isSolo && $0.createdBy == userID } ?? false
+
+        await perform {
+            if isMySoloBide {
+                try await self.api.deleteBide(bideID: bideID)
+            } else {
+                try await self.api.leaveBide(bideID: bideID)
+            }
+            self.forget(bideID)
+            self.reconcileTracking()
+        }
+    }
+
+    /// Drops every local trace of a bide that is no longer this user's.
+    private func forget(_ bideID: UUID) {
+        bides.removeAll { $0.bideID == bideID }
+        answers.clear(bideID)
+        sent.forget(bideID)
+        activities.end(bideID: bideID)
+        baseline[bideID] = nil
+        readings[bideID] = nil
+        departures[bideID] = nil
+        trackedBideIDs.remove(bideID)
+        if trackedBideID == bideID {
+            eta.stopTracking()
+            trackedBideID = nil
+            trackedPlan = nil
+        }
+    }
+
+    /// Processes deletion requests staged when the extension replaces a tile.
+    /// Unaccepted invitations have no server state; existing solo bides are deleted,
+    /// while shared bides are left according to server policy.
+    private func applyRevocations() async {
+        for bideID in sent.revoked() {
+            pending.remove(bideID)
+
+            let mine = bides.first { $0.bideID == bideID }
+            let isMySoloBide = mine.map { $0.isSolo && $0.createdBy == userID } ?? false
+
+            do {
+                if isMySoloBide {
+                    try await api.deleteBide(bideID: bideID)
+                } else {
+                    // This is a no-op when the invitation never created a participant row.
+                    try await api.leaveBide(bideID: bideID)
+                }
+            } catch APIError.notFound {
+                // The bide is already gone or was never created.
+            } catch APIError.notPermitted {
+                // Refused by policy; repeating it would only fail again.
+            } catch {
+                // Offline or cancelled. Keep the request and retry on the next
+                // refresh rather than dropping a deletion the sender asked for.
+                return
+            }
+
+            forget(bideID)
+            sent.clearRevocation(bideID)
+        }
+    }
+
+    /// Routes custom-scheme and Universal Link invitation actions.
     func handle(url: URL) async {
         guard let tile = BideTileMessage(url: url) else { return }
 
@@ -215,38 +364,27 @@ final class BideStore {
         let mode = items.first { $0.name == "mode" }?.value
             .flatMap(TravelMode.init(rawValue:)) ?? .walking
 
-        switch items.first(where: { $0.name == "action" })?.value {
-        case "create":
-            // Nothing opens the app this way any more: the extension records
-            // the invite in the App Group and stays in the thread. Kept so a
-            // URL from an older build — or one arriving some other way — still
-            // lands somewhere sensible instead of being mistaken for an
-            // acceptance, which would create the bide on the spot.
-            //
-            // Sending a tile puts a bide in someone else's thread and has to
-            // outlive this install, so it needs an account behind it. The
-            // extension checks the same flag; this is the check that holds if
-            // the URL arrives any other way.
+        let action = items.first(where: { $0.name == "action" })?.value
+
+        // Support both extension-only action parameters and durable tile flags.
+        if action == "track" || tile.isTrackingInvite {
+            await watch(tile)
+        } else if action == "create" {
+            // Preserve legacy `create` links and require a durable sender identity.
             guard profile.isSignedInWithApple else {
                 errorMessage = "Sign in with Apple to send a Bide to someone."
                 return
             }
             pending.add(PendingInvite(invite: tile.invite, mode: mode))
             await claimPendingInvites()
-        default:
+        } else {
             await accept(tile, mode: mode)
         }
     }
 
     // MARK: - Invitations waiting on an answer
 
-    /// Turns sent tiles into real sessions, once somebody has accepted one.
-    ///
-    /// `join_bide` is the test as much as the action. The bide row does not
-    /// exist until a recipient accepts — their app creates it on the way in —
-    /// so a join that comes back ``APIError/notFound`` means nobody has
-    /// answered yet, and one that succeeds means somebody has and the sender
-    /// belongs in it now.
+    /// Reconciles pending invitations after a recipient creates server state.
     private func claimPendingInvites() async {
         guard userID != nil, !pending.isEmpty else { return }
 
@@ -260,16 +398,13 @@ final class BideStore {
                 pending.remove(staged.id)
                 merge(state)
                 reconcileTracking()
-                // Best effort, and after the fact: a name that doesn't land
-                // is a blank avatar, not a reason to lose the session.
+                // Synchronize the name opportunistically after joining the session.
                 try? await nameMyselfIfNeeded()
                 warnIfClashing(with: state)
             } catch APIError.notFound {
-                // Still unanswered. Ask again on the next refresh.
+                // The recipient has not accepted yet; retry on the next refresh.
             } catch {
-                // Offline, or the server is unwell. Leave every remaining
-                // invite staged and stop asking until the next refresh — the
-                // rest would fail the same way.
+                // Preserve remaining invitations and retry after connectivity recovers.
                 return
             }
         }
@@ -277,20 +412,8 @@ final class BideStore {
 
     // MARK: - Conflicts
 
-    /// A tile the user sent has just been answered, so it is a commitment now
-    /// rather than a question — and this is the first moment it can be weighed
-    /// against the rest of their day, because until somebody accepted there was
-    /// no bide to weigh.
-    ///
-    /// This check used to happen at send time, in the container app, which is
-    /// why sending a tile threw the user out of Messages every time — to be
-    /// asked, nine times in ten, nothing at all. Worse, it asked them to give
-    /// up a real session for a hypothetical one that might never be answered.
-    ///
-    /// "Continue" drops the bides it clashes with, as before. "Cancel" now
-    /// keeps both, which is the honest option here and wasn't at send time:
-    /// somebody has already accepted this one, so quietly walking out of it
-    /// would strand them.
+    /// Prompts for conflicts when a pending invitation becomes an active session.
+    /// Cancelling keeps both commitments; continuing leaves the older conflicts.
     private func warnIfClashing(with state: BideState) {
         guard let userID, let proposed = state.travelWindow(for: userID) else { return }
 
@@ -300,13 +423,14 @@ final class BideStore {
                 guard let window = other.travelWindow(for: userID) else { return nil }
                 return ScheduleConflict.Candidate(
                     id: other.bideID,
-                    destinationName: other.destinationName,
+                    destination: other.destination,
                     window: window
                 )
             }
 
         let clashes = ScheduleConflict.conflicts(
             with: proposed,
+            goingTo: state.destination,
             proposedID: state.bideID,
             among: existing
         )
@@ -320,8 +444,7 @@ final class BideStore {
         }
     }
 
-    /// The design's rule: a new commitment that overlaps an existing one wins,
-    /// and you're told before it does.
+    /// Checks a proposed commitment before replacing overlapping bides.
     private func withConflictCheck(
         for invite: BideInvite,
         mode: TravelMode,
@@ -329,8 +452,7 @@ final class BideStore {
     ) async {
         guard let userID else { return await proceed() }
 
-        // The proposed window needs this person's travel time, which is a
-        // question only the on-device engine can answer.
+        // Calculate the proposed travel window with an on-device estimate.
         let travelTime = try? await eta.estimate(to: invite.destination, mode: mode).travelTime
         let arrival = invite.scheduledFor ?? Date().addingTimeInterval(travelTime ?? 0)
         let proposed = TravelWindow(arriveAt: arrival, travelTime: travelTime ?? 0)
@@ -339,13 +461,14 @@ final class BideStore {
             guard let window = state.travelWindow(for: userID) else { return nil }
             return ScheduleConflict.Candidate(
                 id: state.bideID,
-                destinationName: state.destinationName,
+                destination: state.destination,
                 window: window
             )
         }
 
         let clashes = ScheduleConflict.conflicts(
             with: proposed,
+            goingTo: invite.destination,
             proposedID: invite.bideID,
             among: existing
         )
@@ -365,52 +488,124 @@ final class BideStore {
 
     // MARK: - Tracking
 
-    /// Picks the bide worth tracking — the soonest one still ahead — and
-    /// starts the engine on it. Called after anything that could change which
-    /// that is.
+    /// Bides the local user is travelling on, soonest first.
+    private func travellingBides() -> [BideState] {
+        guard let userID else { return [] }
+        return bides
+            .filter { $0.participant(userID)?.status.isTravelling == true }
+            .sorted { lhs, rhs in
+                (lhs.scheduledFor ?? lhs.createdAt) < (rhs.scheduledFor ?? rhs.createdAt)
+            }
+    }
+
+    /// Active sessions in display order: soonest first, with bides sharing a
+    /// destination kept together beneath the earliest of them.
+    var sessions: [BideState] {
+        func time(_ state: BideState) -> Date { state.scheduledFor ?? state.createdAt }
+
+        var clusters: [[BideState]] = []
+        for state in bides.sorted(by: { time($0) < time($1) }) {
+            let existing = clusters.firstIndex {
+                $0[0].destination.isSamePlace(as: state.destination)
+            }
+            if let existing {
+                clusters[existing].append(state)
+            } else {
+                clusters.append([state])
+            }
+        }
+        return clusters.flatMap { $0 }
+    }
+
+    /// Other active bides heading to the same place as `state`.
+    func companions(of state: BideState) -> [BideState] {
+        bides.filter { $0.bideID != state.bideID && $0.destination.isSamePlace(as: state.destination) }
+    }
+
+    /// Caption for cards that share one journey to the same destination.
+    func companionNote(for state: BideState) -> String? {
+        let sharing = companions(of: state).count
+        guard sharing > 0 else { return nil }
+        return "One of \(sharing + 1) Bides going here"
+    }
+
+    /// Tracks the earliest active bide and same-destination companions with one ETA
+    /// route, then updates a Live Activity for each session.
     private func reconcileTracking() {
         guard let userID else { return }
 
-        let candidate = bides
-            .filter { $0.participant(userID)?.status.isTravelling == true }
-            .min { lhs, rhs in
-                let lhsTime = lhs.scheduledFor ?? lhs.createdAt
-                let rhsTime = rhs.scheduledFor ?? rhs.createdAt
-                return lhsTime < rhsTime
-            }
+        let travelling = travellingBides()
 
-        guard let candidate else {
-            if let trackedBideID {
-                activities.end(bideID: trackedBideID)
-            }
+        guard let anchor = travelling.first else {
+            endActivities(except: [])
             eta.stopTracking()
             trackedBideID = nil
+            trackedBideIDs = []
+            trackedPlan = nil
             return
         }
 
-        // Already on it: just refresh what's on the lock screen.
-        guard candidate.bideID != trackedBideID else {
-            activities.update(state: candidate, plan: plan(for: candidate), me: userID, now: Date())
+        let group = travelling.filter { $0.destination.isSamePlace(as: anchor.destination) }
+        let groupIDs = Set(group.map(\.bideID))
+        endActivities(except: groupIDs)
+        trackedBideIDs = groupIDs
+
+        let mode = anchor.participant(userID)?.mode ?? .walking
+        let anchorPlan = TrackingPlan(
+            destination: anchor.destination,
+            scheduledFor: anchor.scheduledFor,
+            mode: mode
+        )
+
+        // Refresh content without restarting when immutable plan values are unchanged.
+        if anchor.bideID == trackedBideID, anchorPlan == trackedPlan {
+            let now = Date()
+            for state in group {
+                activities.update(state: state, plan: plan(for: state, now: now), me: userID, now: now)
+            }
             return
         }
 
-        if let trackedBideID {
-            activities.end(bideID: trackedBideID)
+        // Restart tracking when an edit changes route or immutable activity attributes.
+        if anchor.bideID == trackedBideID {
+            forgetJourney(for: anchor.bideID)
         }
-        trackedBideID = candidate.bideID
 
-        let mode = candidate.participant(userID)?.mode ?? .walking
-        eta.startTracking(to: candidate.destination, mode: mode) { [weak self] result in
+        // A previous anchor that is still in the group keeps its Live Activity;
+        // one that has dropped out was ended above.
+        trackedBideID = anchor.bideID
+        trackedPlan = anchorPlan
+
+        eta.startTracking(
+            to: anchor.destination,
+            mode: mode,
+            scheduledArrival: anchor.scheduledFor
+        ) { [weak self] result in
             Task { @MainActor in
-                await self?.publish(result, for: candidate.bideID, mode: mode)
+                // Resolve the group at callback time so newly accepted companions
+                // can join the active route without restarting the engine.
+                guard let self else { return }
+                await self.publish(result, for: self.trackedBideIDs)
             }
         }
-        activities.start(state: candidate, plan: plan(for: candidate), me: userID)
+
+        // Newest first: if the system refuses a request for capacity, the most
+        // recently created session is the one that keeps its Live Activity.
+        for state in group.sorted(by: { $0.createdAt > $1.createdAt }) {
+            activities.start(state: state, plan: plan(for: state), me: userID)
+        }
     }
 
-    /// Sends one anchored reading to the server — an arrival timestamp and
-    /// nothing else — and refreshes the lock screen with it.
-    private func publish(_ result: Result<ETAReading, ETAError>, for bideID: UUID, mode: TravelMode) async {
+    /// Ends Live Activities for tracked bides that are no longer in the group.
+    private func endActivities(except keep: Set<UUID>) {
+        for stale in trackedBideIDs.subtracting(keep) {
+            activities.end(bideID: stale)
+        }
+    }
+
+    /// Publishes one arrival reading to every bide sharing the active route.
+    /// Each participant row retains its selected travel mode; no location is sent.
+    private func publish(_ result: Result<ETAReading, ETAError>, for bideIDs: Set<UUID>) async {
         guard case .success(let reading) = result else {
             if case .failure(.locationUnavailable) = result {
                 errorMessage = ETAError.locationUnavailable.errorDescription
@@ -418,22 +613,47 @@ final class BideStore {
             return
         }
 
-        let baselineETA = baseline[bideID] ?? reading.arrival
-        baseline[bideID] = baselineETA
+        for bideID in bideIDs {
+            readings[bideID] = reading
 
-        do {
-            _ = try await api.updateMyETA(
-                bideID: bideID,
-                arrivingAt: reading.arrival,
-                baselineETA: baselineETA,
-                mode: mode,
-                status: reading.hasArrived ? .arrived : .accepted
-            )
-            await refresh()
-        } catch let error as APIError {
-            errorMessage = error.errorDescription
-        } catch {
-            errorMessage = "Couldn't publish your ETA."
+            let baselineETA = baseline[bideID] ?? reading.arrival
+            baseline[bideID] = baselineETA
+
+            // Record departure once and preserve that timestamp across later readings.
+            if reading.hasDeparted, departures[bideID] == nil {
+                departures[bideID] = reading.anchoredAt
+            }
+
+            let mode = userID
+                .flatMap { me in bides.first { $0.bideID == bideID }?.participant(me)?.mode }
+                ?? reading.mode
+
+            do {
+                _ = try await api.updateMyETA(
+                    bideID: bideID,
+                    arrivingAt: reading.arrival,
+                    baselineETA: baselineETA,
+                    travelTime: reading.travelTime,
+                    leftAt: departures[bideID],
+                    mode: mode,
+                    status: reading.hasArrived ? .arrived : .accepted
+                )
+            } catch let error as APIError {
+                if !error.isCancellation { errorMessage = error.errorDescription }
+            } catch {
+                errorMessage = "Couldn't publish your ETA."
+            }
+        }
+
+        await refresh()
+    }
+
+    /// Restores recorded departure times so relaunch does not reset a journey.
+    private func adoptRecordedDepartures() {
+        guard let userID else { return }
+        for state in bides {
+            guard let leftAt = state.participant(userID)?.leftAt else { continue }
+            if departures[state.bideID] == nil { departures[state.bideID] = leftAt }
         }
     }
 
@@ -444,14 +664,15 @@ final class BideStore {
             try await work()
             errorMessage = nil
         } catch let error as APIError {
-            errorMessage = error.errorDescription
+            if !error.isCancellation { errorMessage = error.errorDescription }
+        } catch is CancellationError {
+            // Expected task cancellation during teardown.
         } catch {
             errorMessage = "Something went wrong."
         }
     }
 
-    /// Pushes the local display name to the server the first time it's needed,
-    /// so other people see a name rather than a blank avatar.
+    /// Pushes the local display name when first needed by a participant roster.
     private func nameMyselfIfNeeded() async throws {
         guard let name = profile.displayName else { return }
         try await api.updateDisplayName(name)

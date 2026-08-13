@@ -3,7 +3,6 @@ import XCTest
 
 // MARK: - Doubles
 
-/// Serves canned responses in order and records what it was asked for.
 private actor StubTransport: HTTPTransport {
 
     struct Stub {
@@ -44,7 +43,6 @@ private actor StubTransport: HTTPTransport {
     }
 }
 
-/// Fails the request before it is ever sent.
 private struct FailingTransport: HTTPTransport {
     let error: any Error
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -91,8 +89,6 @@ final class APIClientTests: XCTestCase {
         )
     }
 
-    /// A bide with both people in it, shaped exactly as PostgREST returns an
-    /// embedded resource — including the six fractional digits Postgres emits.
     private var bideJSON: String {
         """
         [{"id":"AAAAAAAA-0000-0000-0000-000000000001",
@@ -132,8 +128,6 @@ final class APIClientTests: XCTestCase {
 
     // MARK: Timestamps
 
-    /// Postgres emits a variable number of fractional digits — none, one, or
-    /// six — and every one of them has to parse.
     func testPostgresTimestampParsesEveryFormatPostgresEmits() throws {
         let expected = Date(timeIntervalSince1970: 1_786_477_405.205)
         for string in [
@@ -146,7 +140,6 @@ final class APIClientTests: XCTestCase {
             XCTAssertEqual(parsed.timeIntervalSince1970, expected.timeIntervalSince1970, accuracy: 0.0005, string)
         }
 
-        // No fractional part at all — the case `.withFractionalSeconds` rejects.
         let whole = try XCTUnwrap(PostgresTimestamp.date(from: "2026-08-11T19:43:25+00:00"))
         XCTAssertEqual(whole.timeIntervalSince1970, 1_786_477_405, accuracy: 0.0005)
     }
@@ -179,11 +172,11 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(request.url?.host(), "abcdefgh.supabase.co")
         XCTAssertEqual(request.url?.path(), "/rest/v1/bides")
         XCTAssertEqual(queryItems(of: request)["id"], "eq.\(bideID.uuidString)")
-        // Participants come back embedded, in the same round trip.
         XCTAssertEqual(
             queryItems(of: request)["select"],
             "id,destination_name,lat,lng,scheduled_for,arrival_style,is_solo,created_at,created_by,"
-                + "participants(user_id,display_name,mode,eta_timestamp,baseline_eta,status,updated_at)"
+                + "participants(user_id,display_name,mode,eta_timestamp,baseline_eta,travel_seconds,"
+                + "left_at,status,updated_at)"
         )
         XCTAssertEqual(request.value(forHTTPHeaderField: "apikey"), "anon-key")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer jwt-token")
@@ -205,7 +198,6 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(me.status, .accepted)
         XCTAssertNotNil(me.etaTimestamp)
 
-        // A participant who hasn't anchored an ETA yet is not a decode failure.
         let them = try XCTUnwrap(state.participant(otherUserID))
         XCTAssertEqual(them.mode, .driving)
         XCTAssertNil(them.etaTimestamp)
@@ -213,8 +205,6 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(state.participants(besides: userID).map(\.userID), [otherUserID])
     }
 
-    /// Row-level security answers "a bide you can't see" with an empty result,
-    /// not a 403, so an empty array is the not-found case.
     func testFetchBideStateTreatsEmptyResultAsNotFound() async {
         let client = makeClient(transport: StubTransport(json: "[]"))
         await XCTAssertThrowsAPIError(.notFound) {
@@ -264,7 +254,6 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(sent["p_lng"] as? Double, -122.2718)
         XCTAssertEqual(sent["p_mode"] as? String, "walking")
         XCTAssertEqual(sent["p_created_at"] as? String, "2026-08-11T19:43:25.205Z")
-        // The creator's identity comes from the JWT, never from the body.
         XCTAssertNil(sent["p_created_by"])
 
         XCTAssertEqual(requests.last?.httpMethod, "GET")
@@ -284,9 +273,6 @@ final class APIClientTests: XCTestCase {
 
     // MARK: joinBide
 
-    /// Joining goes through the function, not an upsert on /participants —
-    /// row-level security refuses ON CONFLICT for someone who hasn't joined
-    /// yet, because the conflict lookup can't see rows in that bide.
     func testJoinBideCallsTheFunction() async throws {
         let transport = StubTransport([
             .init(status: 200, json: "{}"),
@@ -303,15 +289,12 @@ final class APIClientTests: XCTestCase {
         let sent = body(of: join)
         XCTAssertEqual(sent["p_bide_id"] as? String, bideID.uuidString)
         XCTAssertEqual(sent["p_mode"] as? String, "driving")
-        // Identity comes from the JWT, so there is nothing here to forge.
         XCTAssertNil(sent["user_id"])
         XCTAssertNil(sent["p_user_id"])
 
         XCTAssertEqual(requests.last?.httpMethod, "GET")
     }
 
-    /// Joining a bide that doesn't exist trips the foreign key, which is a
-    /// clearer "no such bide" than the bare 409 the status line carries.
     func testJoinBideMapsForeignKeyViolationToNotFound() async {
         let client = makeClient(transport: StubTransport(
             status: 409,
@@ -322,11 +305,68 @@ final class APIClientTests: XCTestCase {
         }
     }
 
+    // MARK: updateBide
+
+    func testUpdateBidePatchesOnlyThePlan() async throws {
+        let transport = StubTransport([
+            .init(status: 200, json: bideJSON),
+            .init(status: 200, json: bideJSON),
+        ])
+        let when = Date(timeIntervalSince1970: 1_786_500_000)
+        let state = try await makeClient(transport: transport).updateBide(
+            bideID: bideID,
+            destination: Destination(name: "Union Market", latitude: 38.908, longitude: -76.997),
+            scheduledFor: when
+        )
+        XCTAssertEqual(state.participants.count, 2)
+
+        let requests = await transport.received
+        let patch = try XCTUnwrap(requests.first)
+        XCTAssertEqual(patch.httpMethod, "PATCH")
+        XCTAssertEqual(patch.url?.path(), "/rest/v1/bides")
+        XCTAssertEqual(queryItems(of: patch)["id"], "eq.\(bideID.uuidString)")
+
+        let sent = body(of: patch)
+        XCTAssertEqual(sent["destination_name"] as? String, "Union Market")
+        XCTAssertEqual(sent["lat"] as? Double, 38.908)
+        XCTAssertEqual(sent["scheduled_for"] as? String, PostgresTimestamp.string(from: when))
+
+        for column in ["id", "created_by", "created_at", "is_solo", "arrival_style"] {
+            XCTAssertNil(sent[column], "\(column) must never be in an edit")
+        }
+
+        XCTAssertEqual(requests.last?.httpMethod, "GET")
+    }
+
+    func testUpdateBideCanClearTheSchedule() async throws {
+        let transport = StubTransport([
+            .init(status: 200, json: bideJSON),
+            .init(status: 200, json: bideJSON),
+        ])
+        _ = try await makeClient(transport: transport).updateBide(
+            bideID: bideID,
+            destination: Destination(name: "Union Market", latitude: 38.908, longitude: -76.997),
+            scheduledFor: nil
+        )
+
+        let requests = await transport.received
+        let patch = try XCTUnwrap(requests.first)
+        XCTAssertTrue(body(of: patch)["scheduled_for"] is NSNull)
+    }
+
+    func testUpdateBideTreatsAnEmptyResultAsNotFound() async {
+        let client = makeClient(transport: StubTransport(status: 200, json: "[]"))
+        await XCTAssertThrowsAPIError(.notFound) {
+            _ = try await client.updateBide(
+                bideID: self.bideID,
+                destination: Destination(name: "Union Market", latitude: 38.908, longitude: -76.997),
+                scheduledFor: nil
+            )
+        }
+    }
+
     // MARK: deleteMe
 
-    /// The request carries no id, and that is the whole security argument: the
-    /// server takes its subject from `auth.uid()`, so there is nothing in the
-    /// body or the query that could name a different account.
     func testDeleteMeNamesNobody() async throws {
         let transport = StubTransport([.init(status: 204, json: "")])
         try await makeClient(transport: transport).deleteMe()
@@ -339,9 +379,6 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(body(of: request).count, 0)
     }
 
-    /// If the migration hasn't been pushed, PostgREST answers 404 for the
-    /// unknown function. That has to arrive as a failure rather than a silent
-    /// success, or a caller believes it deleted an account it didn't.
     func testDeleteMeFailsLoudlyWhenTheFunctionIsMissing() async {
         let client = makeClient(transport: StubTransport(
             status: 404,
@@ -373,8 +410,6 @@ final class APIClientTests: XCTestCase {
         let request = try XCTUnwrap(requests.first)
         XCTAssertEqual(request.httpMethod, "PATCH")
         XCTAssertEqual(request.url?.path(), "/rest/v1/participants")
-        // Both filters present: the policy already scopes this to the caller's
-        // row, and the request says so too.
         XCTAssertEqual(queryItems(of: request)["bide_id"], "eq.\(bideID.uuidString)")
         XCTAssertEqual(queryItems(of: request)["user_id"], "eq.\(userID.uuidString)")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Prefer"), "return=representation")
@@ -382,7 +417,6 @@ final class APIClientTests: XCTestCase {
         let sent = body(of: request)
         XCTAssertEqual(sent["eta_timestamp"] as? String, "2026-08-11T19:55:00.500Z")
         XCTAssertEqual(sent["status"] as? String, "accepted")
-        // The one thing that must never appear in a request body.
         XCTAssertNil(sent["lat"])
         XCTAssertNil(sent["lng"])
     }
@@ -393,7 +427,15 @@ final class APIClientTests: XCTestCase {
               "updated_at":"2026-08-11T19:44:00+00:00","status":"arrived"}]
             """)
         let participant = try await makeClient(transport: transport)
-            .updateMyETA(bideID: bideID, arrivingAt: nil, baselineETA: nil, mode: .walking, status: .arrived)
+            .updateMyETA(
+                bideID: bideID,
+                arrivingAt: nil,
+                baselineETA: nil,
+                travelTime: nil,
+                leftAt: nil,
+                mode: .walking,
+                status: .arrived
+            )
 
         XCTAssertNil(participant.etaTimestamp)
         XCTAssertEqual(participant.status, .arrived)
@@ -403,7 +445,6 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(body(of: request)["eta_timestamp"] is NSNull)
     }
 
-    /// Zero rows updated means the caller isn't in this bide.
     func testUpdateMyETAOnAForeignBideIsNotFound() async {
         let client = makeClient(transport: StubTransport(json: "[]"))
         await XCTAssertThrowsAPIError(.notFound) {
@@ -492,35 +533,29 @@ final class APIClientTests: XCTestCase {
     func testTravelModeMatchesTheETAPolicy() {
         XCTAssertEqual(TravelMode.driving.reanchorInterval, 5 * 60)
         XCTAssertEqual(TravelMode.walking.reanchorInterval, 10 * 60)
-        // Transit is exposed to timetables, so it re-anchors on the short
-        // cadence like driving does.
         XCTAssertEqual(TravelMode.transit.reanchorInterval, 5 * 60)
+        XCTAssertEqual(TravelMode.cycling.reanchorInterval, 10 * 60)
     }
 
-    /// Only these three can be picked or persisted, and the database's check
-    /// constraint lists exactly the same set. A mode the ETA engine can't
-    /// answer for must never reach a participant row.
     func testOnlyRoutableModesAreSelectable() {
-        XCTAssertEqual(TravelMode.selectable, [.walking, .driving, .transit])
-        for mode in [TravelMode.cycling, .flying, .train] {
+        XCTAssertEqual(TravelMode.selectable, [.walking, .driving, .cycling, .transit])
+        for mode in [TravelMode.flying, .train] {
             XCTAssertFalse(mode.isSelectable, "\(mode.rawValue) has no ETA source yet")
         }
-        // The row still shows the unavailable ones — dimmed, not missing.
         XCTAssertEqual(TravelMode.displayOrder.count, 5)
         XCTAssertTrue(TravelMode.displayOrder.contains(.cycling))
     }
 
-    /// Route deviation needs a polyline, which only these two come with.
     func testOnlyRoutedModesTrackDeviation() {
         XCTAssertTrue(TravelMode.walking.tracksRouteDeviation)
         XCTAssertTrue(TravelMode.driving.tracksRouteDeviation)
+        XCTAssertTrue(TravelMode.cycling.tracksRouteDeviation)
         XCTAssertFalse(TravelMode.transit.tracksRouteDeviation)
     }
 }
 
 // MARK: - Helper
 
-/// Asserts an async call throws a specific ``APIError``.
 private func XCTAssertThrowsAPIError(
     _ expected: APIError,
     _ message: String = "",

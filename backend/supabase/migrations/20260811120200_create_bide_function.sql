@@ -1,11 +1,5 @@
--- Creating a bide writes two rows: the bide, and the creator's own participant
--- row. They must land together — a bide with no participants is unreadable
--- even to the person who just created it, because the SELECT policy on
--- `bides` requires membership. A function gets both in one transaction.
---
--- `security invoker` (the default, stated here for emphasis): every statement
--- below is still checked against the policies in the previous migration, so
--- this convenience wrapper grants no authority the caller doesn't already have.
+-- Create the bide and its first participant atomically. `security invoker`
+-- keeps both writes subject to the caller's existing RLS permissions.
 create function public.create_bide(
   p_bide_id uuid,
   p_destination_name text,
@@ -27,8 +21,7 @@ begin
     raise exception 'not authenticated' using errcode = '28000';
   end if;
 
-  -- No RETURNING here. RETURNING is checked against the SELECT policy, and
-  -- the caller isn't a participant yet, so it would fail on its own row.
+  -- `RETURNING` would fail its SELECT policy because membership is added next.
   insert into public.bides (id, destination_name, lat, lng, created_at, created_by)
   values (
     p_bide_id,
@@ -42,7 +35,6 @@ begin
   insert into public.participants (bide_id, user_id, mode)
   values (p_bide_id, v_user_id, p_mode);
 
-  -- Readable now that membership exists.
   select * into v_bide from public.bides where id = p_bide_id;
   return v_bide;
 end;

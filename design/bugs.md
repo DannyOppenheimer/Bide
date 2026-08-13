@@ -488,3 +488,260 @@ margin. `monospacedDigit()` keeps that width from twitching once a second as
 the digits change. The trailing slot also stops showing `.timer` once the
 departure has passed — same reason as the headline, it would count up — and
 says "now" instead.
+
+---
+
+# Round five
+
+28. Once past the landing page, pulling to refresh gives "Couldn't reach Bide.
+    Check your connection" — and if the cards are live, why is there a refresh
+    at all?
+29. Can the display name be set automatically from the Apple account name?
+30. A solo bide for "now" says "Leave now" at the top and then counts down in
+    green underneath. What does that mean? It can't be my ETA — I haven't
+    moved. It should say "Leave now" until I actually leave a radius around
+    where I made the bide, then "On the way"; the green text should read
+    ETA / Time, live from my location rather than counting down on its own; and
+    the pill around the front camera should show my ETA, not "Now". The same
+    goes for iMessage and group bides, and for "arrive at the same time":
+    everyone else waits — "waiting…" — until the person with furthest to go
+    actually leaves, and only then does everyone get a live "Leave in X" off
+    that person's real ETA, turning into "Leave now" as they close the gap.
+
+---
+
+# Resolutions
+
+## 28 — A refresh that could only make things worse
+
+Two answers, and the second one is the real fix.
+
+**Why it failed.** `APIError.transport` renders as "Couldn't reach Bide. Check
+your connection", and `URLError(.cancelled)` is a `transport` error — so a
+request that was *cancelled* said the network was down. Pull-to-refresh calls
+the same `refresh()` the 30-second poll is already calling, and the two run
+concurrently on the same session; whichever loses gets torn down, and its
+cancellation was reported as an outage. `APIError.isCancellation` now names
+that case, and `BideStore` never turns one into a message. A cancelled request
+is this app tearing down its own work; there is nothing for the user to check.
+
+**Why there is nothing to refresh.** The question in the report is the right
+one. The cards count their own clocks off a one-second tick, and `BideStore`
+re-reads everyone's ETAs every 30 seconds for as long as the screen is up.
+Pull-to-refresh added no information — only a second, redundant fetch and a way
+to collide with the first. It's gone. The one moment the poll can't cover is
+the app coming back from the background, where it doesn't run at all, so
+`scenePhase` becoming `.active` triggers a refresh.
+
+## 29 — The name Apple says exactly once
+
+Apple puts a person's name in `ASAuthorizationAppleIDCredential.fullName` on
+the **first** authorisation of an app by an Apple ID, and never again — not in
+the identity token, not on any later sign-in. The app was already reading it
+there, but only into the App Group and the participant rows, both of which are
+gone after a reinstall. And bug 1 of round one means the very first
+authorisations *failed at Supabase* while consuming that one-time offer, so for
+anyone who signed in on those builds the name is simply gone.
+
+Three changes:
+
+- `BideAuthProvider.record(displayName:)` writes the name to the account
+  (`PUT /auth/v1/user`, `user_metadata.full_name`), which is the one place that
+  survives a reinstall and reaches a second device.
+- `BideSession.displayName` reads it back — GoTrue returns `user_metadata` on
+  every sign-in — and `AuthController.adoptAccountName()` takes it whenever
+  this device hasn't got a name of its own. It never overwrites one the user
+  typed: this answers "what should we call you" for somebody who was never
+  asked, it doesn't correct somebody who answered.
+- A name typed in Settings goes to the account too, for the same reason.
+
+The full name is shortened to its first word. "Danny Oppenheimer" under a 52pt
+avatar in a roster four people wide is a truncation waiting to happen.
+
+**For an Apple ID that has already authorised Bide, there is nothing to
+recover.** Apple will not re-offer the name. Settings → your name → Sign in
+with Apple → Bide → "Stop Using Apple ID", then sign in again, makes the next
+sign-in a first authorisation and the name arrives.
+
+## 30 — Having an ETA is not having left
+
+One wrong assumption, in one line, behind every symptom in the report:
+
+```swift
+public var hasLeft: Bool { status == .accepted && etaTimestamp != nil }
+```
+
+The ETA engine anchors an estimate the moment a bide starts being tracked,
+which is normally while its owner is still indoors. So "has an ETA" meant "a
+phone is running Bide", not "a person is on their way" — and an arrival
+timestamp built that way is only ever *now plus the journey*, re-stated on
+every anchor. Counting down to it is counting down to a moment nobody is
+travelling towards. That is the green number in the report, and it is why it
+ran down while its owner stood still.
+
+**Departure is now a fact about movement.** `MapKitETAEngine` keeps the
+location it first saw for a tracking session, and reports
+`ETAReading.hasDeparted` once a fix lands more than 150m from it — generous
+enough that a drifting indoor fix, a car park, or the far end of an office all
+still read as "here". The location never leaves the engine; what leaves is a
+boolean. `participants.left_at` records the moment on the server, because in a
+group the answer belongs to everyone. The migration's header explains at length
+why a timestamp derived from an on-device radius test does not breach the
+privacy invariant, and the invariant's own test — a regex over the column names
+of `participants` and `devices` — still passes.
+
+**Two numbers, and which one moves.** `participants.travel_seconds` carries the
+journey's *length* alongside the arrival timestamp. It is not new information —
+it is `eta_timestamp` minus the moment it was written — but it is the number
+that survives standing still, and the one the roster leads with. Each person's
+block is now `10 min` at 20pt, over `Scheduled ETA: 3:30 PM` and
+`Actual: 3:45 PM` — the glance answer on top, and underneath it the comparison
+that turns it into "fifteen minutes late" without anybody doing arithmetic.
+And:
+
+- **still where they started** — the headline number holds still and "Actual"
+  slides forward with the clock, because sitting there is not getting them any
+  closer;
+- **on their way** — "Actual" holds still and the headline number counts down
+  to it, rendered as a live `Text(_, style: .relative)` so the lock screen
+  stays current without a push.
+
+The roster grid drops from four columns to three, since a 75pt tile shrinks
+"Scheduled ETA: 3:30 PM" past legibility. The Live Activity can't reflow at all
+— fixed 160pt box, four across — so there the scheduled time is said once,
+beside the destination in the header, and the tiles carry the number and
+"Actual" only.
+
+The colour follows the same rule. `delayGrade` used to compare a re-stated
+estimate against the first one ever recorded, so a person who hadn't left yet
+went yellow and then red for the crime of not having gone. Nothing has slipped
+until the journey has started; before that it is green.
+
+**The headline.** `BidePlanner` takes `hasDeparted` and returns it on the plan:
+
+| state | top line |
+| --- | --- |
+| hasn't left, on-time bide | "Leave in 45 minutes" → "Leave now" |
+| hasn't left, asap bide | "Leave now" from the moment it exists |
+| left | "On the way" |
+| arrived | "You're here" / "Everyone's here" |
+| together, waiting | "Waiting for Sarah to leave" |
+
+**Arrive at the same time.** The style is *defined* as nobody leaving until the
+person with furthest to go has gone, and it was releasing everybody the moment
+that person's phone produced its first estimate — sending the near people out
+to stand at the other end, which is the exact thing it exists to prevent.
+Now: while the furthest hasn't left, everyone else is held with no leave time
+at all, and anyone without an estimate yet holds the bide too, since they could
+turn out to be the furthest of all. The furthest person themselves is nobody's
+follower — they get the ordinary rules and the earliest departure in the bide.
+Once they go, the meeting *is* their arrival: everyone leaves their own journey
+ahead of it, off that person's live ETA, so the near people are told to go one
+by one, nearest last. Someone whose journey is longer than what's left of the
+leader's gets a departure in the past, which reads as "leave now" because it is.
+
+**The Dynamic Island.** The compact slot said "now" — for an asap bide, from
+the moment it was made until the moment it ended, because nothing could tell
+the app its owner had gone. Departure being a real fact is what makes that slot
+usable, and what it carries is the decision: a live countdown to leaving, then
+"Now" when it's time, and — once there is nothing left to leave for — the trip.
+Five characters is the budget, so it is the number rather than the sentence;
+the expanded island right behind it says the words in full.
+
+**The transcript tile.** A Messages tile is a snapshot with no server behind
+it, so for an arrive-together bide it no longer prints a leave time at all —
+that one depends on somebody else's phone, and a frozen guess would sit in the
+thread saying "leave at 3:00" all afternoon. It says the app is tracking, which
+is true, and the app takes over the moment they accept.
+
+**Applying it.** `backend/supabase/migrations/20260813120000_add_departure_and_travel_time.sql`
+has to be pushed before a build talks to the project — the client selects both
+new columns, so PostgREST will refuse every read until they exist.
+
+---
+
+# Round six
+
+31. The display name is meant to be set from the Apple account name on sign-in,
+    but after signing in the Settings field was still empty — it should show
+    what you are changing *from*.
+32. The roster's `Scheduled ETA:` line is correctly omitted on a "leave now"
+    bide, but `Actual:` is left behind on its own. Strip the tag too: actual
+    compared to nothing.
+33. A tile sent for "now" says "as soon as everyone can"; one sent for a time
+    says that time. Once the clock passes that time, can the tile update itself
+    to say "as soon as everyone can"?
+34. The Messages compose sheet and the solo-bide form both label the field
+    "Time". Call it "Meetup time".
+
+---
+
+# Resolutions
+
+## 31 — A name the device had and the account didn't
+
+`adoptAccountName()` only ever copied in one direction: account → device, and
+only when the device had no name. The reverse case had nothing to carry it.
+That case is the common one in development, and it is a real one in production:
+the device's name survives an account being replaced (`DevBuildReset` preserves
+it deliberately, since Apple offers a name exactly once), so a fresh account
+gets no `user_metadata.full_name`, no participant rows, and no way to recover
+the name on the next reinstall — while the device sat on it the whole time.
+
+`reconcileName()` replaces it and runs in both directions, with the device
+winning when both have an answer, since typing a name in Settings writes it to
+both. And `record(_:)` now updates the session in hand as well as the account,
+so the name just written is readable immediately rather than after the next
+token refresh — without that, every launch would decide the account was still
+nameless and write it again.
+
+The settings field itself prefills from the device, falling back to
+`AuthController.accountDisplayName` — which is what covers a reinstall or a
+second phone, where the name is on the account and nowhere locally. It fills
+only a blank, and re-runs `onChange` of the account name, so a sheet opened
+while the session is still restoring fills in when the answer lands rather than
+staying empty for as long as it is looked at.
+
+**Still nothing to recover for an Apple ID that has already authorised Bide**
+and never had a name captured — see round five, item 29. Apple will not
+re-offer it; the way back is "Stop Using Apple ID" and signing in again.
+
+## 32 — Half a comparison
+
+"Actual" only means something next to the time the bide was set for. On an asap
+bide there is no such time, so the word was drawing a contrast with nothing —
+reading as though a second number had gone missing rather than never existed.
+
+`BideFormat.arrivalLine(_:comparedTo:)` decides: labelled when a scheduled time
+is on screen, bare when it isn't. The comparison is against `scheduledArrival`
+rather than against the line directly above it, because the Live Activity hides
+that line and prints the same time once in its header — so "Actual" still has
+its other half there, and only a genuine asap bide drops the tag.
+
+## 33 — A tile that outlives its own plan
+
+`BideFormat.schedule` now returns "As soon as everyone can" for a time that has
+gone by, not just for one that was never set. A bubble still reading
+"Today · 3:30 PM" at four o'clock is worse than one that never named a time: it
+describes a plan that has stopped existing.
+
+Making it *update* is the other half. Nothing of ours runs in a transcript, and
+a timer ticking behind a bubble that is mostly off screen would be the wrong way
+to buy one. `TranscriptView` hands the system the handful of moments this tile's
+words actually change — the departure it counts down to, and the meetup time —
+as `TimelineView(.explicit(_:))` entries: one redraw each, at exactly the right
+second, and nothing in between. "Now" leads the list, because `.explicit`
+renders at the latest entry that isn't in the future and a tile dated from when
+the bide was made would print a calendar date instead of "Today".
+
+The fallback `MSMessageTemplateLayout` subcaption is still stamped at insert
+time and cannot change — that is the layout for devices without Bide installed,
+and an extension cannot rewrite a message somebody has already sent.
+
+## 34 — "Time"
+
+Now "Meetup time", in the field label and in the picker sheet's title. One
+`BidePlanForm`, so the Messages compose sheet and the solo-bide card both get
+it. Next to a travel-mode row and a countdown, a bare "Time" reads just as
+easily as the time to set off — which is the one number in this app nobody
+enters.

@@ -1,22 +1,14 @@
--- What a bide is *for*: a time, a way of arriving, and an answer from each
--- person.
---
--- The privacy invariant from the first migration is unchanged and still binding.
--- Nothing added here is a location. `scheduled_for` is a clock time everyone
--- agreed on, `baseline_eta` is the first arrival TIMESTAMP we recorded for a
--- person, and `status` is what they said. There is still no column anywhere
--- that could hold where somebody is.
+-- Add scheduling, arrival style, and participant responses. These fields contain
+-- times and state only; the schema still stores no participant location data.
 
--- MARK: bides
+-- Bides
 
 alter table public.bides
-  -- Null means "as soon as everyone can get there" — the design's asap bide,
-  -- where the arrival time is whatever the longest journey works out to.
+  -- Null means the bide starts as soon as everyone can arrive.
   add column scheduled_for timestamptz,
   add column arrival_style text not null default 'on_time'
     check (arrival_style in ('on_time', 'together')),
-  -- A bide with an audience rather than participants: one person is going
-  -- somewhere, and anyone else in it is only watching.
+  -- A solo bide has one traveler; other members only watch the journey.
   add column is_solo boolean not null default false;
 
 comment on column public.bides.scheduled_for is
@@ -24,29 +16,22 @@ comment on column public.bides.scheduled_for is
 comment on column public.bides.arrival_style is
   'on_time: everyone lands by scheduled_for. together: nobody leaves until the furthest person does.';
 
--- MARK: participants
+-- Participants
 
 alter table public.participants
   add column display_name text check (char_length(display_name) <= 80),
-  -- The first ETA ever recorded for this person. Every later one is graded
-  -- against it for the green/yellow/red colouring, so it must not move.
+  -- Keep the first ETA fixed as the reference for later delay grades.
   add column baseline_eta timestamptz,
   add column status text not null default 'invited'
     check (status in ('invited', 'accepted', 'declined', 'arrived'));
 
--- `arrived` couldn't tell "hasn't answered" from "said no", which is the
--- distinction the tile is built around. Existing rows carry over: anyone
--- already marked arrived stays arrived, everyone else was, by definition,
--- someone who had joined.
+-- Replace the boolean with a status that distinguishes no response from decline.
 update public.participants
    set status = case when arrived then 'arrived' else 'accepted' end;
 
 alter table public.participants drop column arrived;
 
--- Transit joins the modes that can be routed. Cycling, flights and trains are
--- deliberately absent: MapKit has no cycling directions, and the other two
--- need live carrier tracking that doesn't exist yet. The check is what stops
--- a client persisting one of them by accident.
+-- Allow only modes with an implemented ETA source. Cycling is added separately.
 alter table public.participants drop constraint participants_mode_check;
 alter table public.participants
   add constraint participants_mode_check check (mode in ('driving', 'walking', 'transit'));
@@ -58,11 +43,9 @@ comment on column public.participants.baseline_eta is
 comment on column public.participants.display_name is
   'What they call themselves. Null for someone who never set one — the UI shows a placeholder, never an id.';
 
--- MARK: create_bide
+-- create_bide
 
--- The signature changes, so the old function is replaced outright rather than
--- overloaded: two versions differing only by trailing arguments would make it
--- ambiguous which one PostgREST picks.
+-- Drop the old signature to prevent ambiguous PostgREST overload resolution.
 drop function if exists public.create_bide(uuid, text, double precision, double precision, timestamptz, text);
 
 create function public.create_bide(
@@ -89,8 +72,7 @@ begin
     raise exception 'not authenticated' using errcode = '28000';
   end if;
 
-  -- No RETURNING here. RETURNING is checked against the SELECT policy, and
-  -- the caller isn't a participant yet, so it would fail on its own row.
+  -- `RETURNING` would fail its SELECT policy because membership is added next.
   insert into public.bides (
     id, destination_name, lat, lng, scheduled_for, arrival_style, is_solo, created_at, created_by
   )
@@ -106,11 +88,10 @@ begin
     v_user_id
   );
 
-  -- The creator has, by sending the tile, already accepted it.
+  -- The creator implicitly accepts the bide they send.
   insert into public.participants (bide_id, user_id, mode, status)
   values (p_bide_id, v_user_id, p_mode, 'accepted');
 
-  -- Readable now that membership exists.
   select * into v_bide from public.bides where id = p_bide_id;
   return v_bide;
 end;
@@ -126,12 +107,11 @@ grant execute on function public.create_bide(
   uuid, text, double precision, double precision, timestamptz, text, boolean, timestamptz, text
 ) to authenticated;
 
--- MARK: join_bide
+-- join_bide
 
 drop function if exists public.join_bide(uuid, text);
 
--- Still no ON CONFLICT — see the previous migration for why row-level security
--- refuses it for exactly the case joining is about.
+-- Avoid `ON CONFLICT`; its conflict lookup is blocked by RLS before joining.
 create function public.join_bide(
   p_bide_id uuid,
   p_mode text,
@@ -158,8 +138,7 @@ begin
      and user_id = v_user_id;
 
   if not found then
-    -- Fails with a foreign key violation if the bide does not exist, which the
-    -- client maps to "no such bide" rather than a bare conflict.
+    -- A missing bide raises the foreign-key error that the client maps to not found.
     insert into public.participants (bide_id, user_id, mode, status)
     values (p_bide_id, v_user_id, p_mode, v_status);
   end if;

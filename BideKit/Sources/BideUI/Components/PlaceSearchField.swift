@@ -1,12 +1,7 @@
 import SwiftUI
 import BideKit
 
-/// "Search locations" — the field at the top of every compose form.
-///
-/// Backed by Apple Maps' own completer, so the suggestions are the ones the
-/// user would get in Maps. Once a row is picked the field collapses to the
-/// chosen place with a clear button, which is what keeps the sheet short
-/// enough for the Messages extension.
+/// MapKit-backed place search field used by compose forms.
 public struct PlaceSearchField: View {
 
     @Bindable private var service: PlaceSearchService

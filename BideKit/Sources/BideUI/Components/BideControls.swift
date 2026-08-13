@@ -1,7 +1,7 @@
 import SwiftUI
 import BideKit
 
-/// The white pill that ends every Bide form — Send, Save, Accept.
+/// Primary full-width pill button used for form actions.
 public struct BidePrimaryButtonStyle: ButtonStyle {
 
     public init() {}
@@ -18,7 +18,7 @@ public struct BidePrimaryButtonStyle: ButtonStyle {
     }
 }
 
-/// The outlined pill that sits beside it — Decline.
+/// Secondary outlined pill button.
 public struct BideSecondaryButtonStyle: ButtonStyle {
 
     public init() {}
@@ -43,16 +43,15 @@ extension ButtonStyle where Self == BideSecondaryButtonStyle {
     public static var bideSecondary: BideSecondaryButtonStyle { BideSecondaryButtonStyle() }
 }
 
-/// The two chip looks the reference screens use: white on the Messages
-/// compose sheet, grey on the app's own card.
+/// Visual emphasis options for value chips.
 public enum BideChipEmphasis: Sendable {
-    /// White fill, dark text.
+    /// Light fill with dark text.
     case solid
-    /// Grey fill, white text.
+    /// Dark fill with light text.
     case subtle
 }
 
-/// A small rounded value button — the date, the time, the arrival style.
+/// Compact rounded button for date, time, and arrival-style values.
 public struct BideChip<Label: View>: View {
 
     private let emphasis: BideChipEmphasis
@@ -85,7 +84,7 @@ public struct BideChip<Label: View>: View {
     }
 }
 
-/// A label above a field — "Date", "Time", "Arrival Style".
+/// Label displayed above a form field.
 public struct BideFieldLabel: View {
 
     private let text: String
@@ -101,7 +100,7 @@ public struct BideFieldLabel: View {
     }
 }
 
-/// The red LIVE badge on an active session.
+/// Live-status badge for an active session.
 public struct LivePill: View {
 
     public init() {}
@@ -122,8 +121,27 @@ public struct LivePill: View {
     }
 }
 
-/// Someone's circle in the roster, with their travel mode tucked into the
-/// corner exactly as the reference screens show it.
+/// Badge for a journey the local user is following rather than attending.
+public struct WatchingPill: View {
+
+    public init() {}
+
+    public var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "eye.fill")
+                .font(.system(size: 8, weight: .bold))
+            Text("TRACKING")
+                .font(BideFont.badge)
+        }
+        .foregroundStyle(BideColor.primaryText)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(BideColor.watching, in: Capsule())
+        .accessibilityLabel("Tracking someone else's trip")
+    }
+}
+
+/// Participant avatar with a travel-mode badge.
 public struct ParticipantAvatar: View {
 
     private let initial: String
@@ -157,17 +175,24 @@ public struct ParticipantAvatar: View {
     }
 }
 
-/// One person in the roster: avatar, name, and their line — "Waiting..." until
-/// they set off, then a live ETA coloured by how far behind they are.
+/// Roster tile showing a participant's identity and journey state.
 public struct ParticipantTile: View {
 
     private let name: String
     private let initial: String
     private let mode: TravelMode
     private let status: String
-    /// When they arrive, if they're on their way — see ``etaLine``.
-    private let etaTimestamp: Date?
+    /// Latest journey duration, if the participant has an active journey.
+    private let travelTime: TimeInterval?
+    /// Expected arrival, counted down only after departure.
+    private let arrival: Date?
+    private let hasDeparted: Bool
+    /// Shared scheduled arrival, omitted for ASAP bides.
+    private let scheduledArrival: Date?
+    /// Whether the tile has room to repeat the scheduled arrival.
+    private let showsSchedule: Bool
     private let grade: DelayGrade?
+    private let now: Date
     private let avatarSize: CGFloat
 
     public init(
@@ -175,23 +200,35 @@ public struct ParticipantTile: View {
         initial: String,
         mode: TravelMode,
         status: String,
-        etaTimestamp: Date? = nil,
+        travelTime: TimeInterval? = nil,
+        arrival: Date? = nil,
+        hasDeparted: Bool = false,
+        scheduledArrival: Date? = nil,
+        showsSchedule: Bool = true,
         grade: DelayGrade? = nil,
+        now: Date = Date(),
         avatarSize: CGFloat = BideMetrics.avatarSize
     ) {
         self.name = name
         self.initial = initial
         self.mode = mode
         self.status = status
-        self.etaTimestamp = etaTimestamp
+        self.travelTime = travelTime
+        self.arrival = arrival
+        self.hasDeparted = hasDeparted
+        self.scheduledArrival = scheduledArrival
+        self.showsSchedule = showsSchedule
         self.grade = grade
+        self.now = now
         self.avatarSize = avatarSize
     }
 
-    /// - Parameter me: The local user's id, so their own tile reads "You".
+    /// - Parameter me: Local user identifier used to label their tile as "You".
     public init(
         participant: Participant,
         me: UUID? = nil,
+        scheduledArrival: Date? = nil,
+        showsSchedule: Bool = true,
         now: Date = Date(),
         avatarSize: CGFloat = BideMetrics.avatarSize
     ) {
@@ -200,21 +237,37 @@ public struct ParticipantTile: View {
             initial: BideFormat.initial(participant, me: me),
             mode: participant.mode,
             status: BideFormat.participantStatus(participant, now: now),
-            etaTimestamp: participant.status == .accepted ? participant.etaTimestamp : nil,
+            travelTime: participant.remainingTravel(now: now),
+            arrival: participant.arrival(now: now),
+            hasDeparted: participant.hasLeft,
+            scheduledArrival: scheduledArrival,
+            showsSchedule: showsSchedule,
             grade: participant.delayGrade,
+            now: now,
             avatarSize: avatarSize
         )
     }
 
-    /// The Live Activity's flattened form, which arrives ready to draw.
-    public init(participant: ActivityParticipant, avatarSize: CGFloat = BideMetrics.avatarSize) {
+    /// Creates a tile from display-ready Live Activity data.
+    public init(
+        participant: ActivityParticipant,
+        scheduledArrival: Date? = nil,
+        showsSchedule: Bool = true,
+        now: Date = Date(),
+        avatarSize: CGFloat = BideMetrics.avatarSize
+    ) {
         self.init(
             name: participant.name,
             initial: participant.initial,
             mode: participant.mode,
             status: participant.line,
-            etaTimestamp: participant.eta,
+            travelTime: participant.travelTime,
+            arrival: participant.eta,
+            hasDeparted: participant.hasDeparted,
+            scheduledArrival: scheduledArrival,
+            showsSchedule: showsSchedule,
             grade: participant.grade,
+            now: now,
             avatarSize: avatarSize
         )
     }
@@ -225,34 +278,57 @@ public struct ParticipantTile: View {
             Text(name)
                 .font(BideFont.personName)
                 .foregroundStyle(BideColor.primaryText)
-            etaLine
-                .font(BideFont.caption)
+            journey
                 .foregroundStyle(grade.map(BideColor.delay) ?? BideColor.secondaryText)
         }
         .lineLimit(1)
+        // Allow long schedule labels to fit when four tiles share the width.
+        .minimumScaleFactor(0.6)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(name), \(status)")
     }
 
-    /// The line under the name, live wherever it can be.
-    ///
-    /// The app redraws this every second off a ticking clock; the Live Activity
-    /// is redrawn only when the app pushes it something. Rendering a *date*
-    /// rather than a string it was handed earlier is what lets the system keep
-    /// the lock screen current on its own — and, because both surfaces go
-    /// through here, is what stops them disagreeing about the same person by a
-    /// minute, which is what they used to do.
-    ///
-    /// Only for an arrival still ahead. Behind it, the relative style counts
-    /// *upwards*, which would turn a missed ETA into a stopwatch; `status` has
-    /// the words for that case and every other one — "Waiting…", "Arrived",
-    /// "Not coming".
+    /// Shows a fixed journey duration before departure and a live countdown
+    /// afterward. Participants without a journey display their status text.
     @ViewBuilder
-    private var etaLine: some View {
-        if let etaTimestamp, etaTimestamp.timeIntervalSinceNow > 0 {
-            Text(etaTimestamp, style: .relative)
+    private var journey: some View {
+        if let travelTime {
+            let arrival = arrival ?? now.addingTimeInterval(travelTime)
+            VStack(spacing: 2) {
+                Group {
+                    if hasDeparted, arrival > now {
+                        Text(arrival, style: .relative)
+                    } else {
+                        Text(BideFormat.shortDuration(travelTime))
+                    }
+                }
+                .font(BideFont.etaValue)
+                .monospacedDigit()
+
+                VStack(spacing: 0) {
+                    if showsSchedule, let scheduledArrival {
+                        Text(BideFormat.scheduledLine(scheduledArrival))
+                            .foregroundStyle(BideColor.secondaryText)
+                    }
+                    // Before departure, update the moving "now + duration" arrival each minute.
+                    if hasDeparted {
+                        Text(BideFormat.arrivalLine(arrival, comparedTo: scheduledArrival))
+                    } else {
+                        TimelineView(.periodic(from: now, by: 60)) { context in
+                            Text(
+                                BideFormat.arrivalLine(
+                                    context.date.addingTimeInterval(travelTime),
+                                    comparedTo: scheduledArrival
+                                )
+                            )
+                        }
+                    }
+                }
+                .font(BideFont.caption)
+            }
         } else {
             Text(status)
+                .font(BideFont.caption)
         }
     }
 }
@@ -266,7 +342,17 @@ public struct ParticipantTile: View {
         }
         HStack(spacing: 16) {
             ParticipantTile(name: "Sarah", initial: "S", mode: .driving, status: "Waiting...")
-            ParticipantTile(name: "Michael", initial: "M", mode: .transit, status: "45 minutes", grade: .slipping)
+            ParticipantTile(
+                name: "Michael",
+                initial: "M",
+                mode: .transit,
+                status: "45 minutes",
+                travelTime: 45 * 60,
+                arrival: Date().addingTimeInterval(45 * 60),
+                hasDeparted: true,
+                scheduledArrival: Date().addingTimeInterval(35 * 60),
+                grade: .slipping
+            )
         }
         Button("Accept") {}.buttonStyle(.bidePrimary)
         Button("Decline") {}.buttonStyle(.bideSecondary)

@@ -1,9 +1,6 @@
 import XCTest
 @testable import BideKit
 
-/// A tile's answer travels in the URL, because that is the only thing an
-/// `MSMessage` carries. If this round trip breaks, a thread silently stops
-/// reflecting what people said.
 final class BideTileMessageTests: XCTestCase {
 
     private func invite(scheduled: Bool = true) -> BideInvite {
@@ -34,7 +31,6 @@ final class BideTileMessageTests: XCTestCase {
         }
     }
 
-    /// A plain invitation carries no answer, and adds nothing to the URL.
     func testInvitationIsJustTheInvite() {
         let tile = BideTileMessage(invite: invite())
         XCTAssertEqual(tile.webURL(), tile.invite.webURL())
@@ -60,8 +56,6 @@ final class BideTileMessageTests: XCTestCase {
         assertRoundTrips(BideTileMessage(invite: invite(scheduled: false), answer: .accepted))
     }
 
-    /// A name is someone's actual name. It must survive the URL, and must not
-    /// be able to forge the fields around it.
     func testNamesWithPunctuationSurvive() {
         for name in ["Ana María", "O'Brien", "山田", "Jo 🎈"] {
             assertRoundTrips(BideTileMessage(invite: invite(), answer: .accepted, senderName: name))
@@ -79,15 +73,12 @@ final class BideTileMessageTests: XCTestCase {
         XCTAssertEqual(decoded?.invite.lat, 38.873)
     }
 
-    /// Anything that isn't a Bide tile decodes to nothing rather than to a
-    /// half-populated one.
     func testUnrelatedURLsAreRejected() {
-        XCTAssertNil(BideTileMessage(url: URL(string: "https://example.com/meet?to=Nowhere")!))
+        XCTAssertNil(BideTileMessage(url: URL(string: "https://example.com/trip?to=Nowhere")!))
         XCTAssertNil(BideTileMessage(url: URL(string: "bide://something-else")!))
     }
 }
 
-/// The draft behind both compose forms.
 final class BidePlanDraftTests: XCTestCase {
 
     func testADraftWithoutADestinationIsNotComplete() {
@@ -99,7 +90,6 @@ final class BidePlanDraftTests: XCTestCase {
         XCTAssertEqual(draft.invite()?.destinationName, "Nats Park")
     }
 
-    /// People arrange to meet at :00, :15, :30 and :45 — never at 3:07.
     func testDefaultTimeRoundsUpToTheNextQuarterHour() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -112,8 +102,6 @@ final class BidePlanDraftTests: XCTestCase {
         }
     }
 
-    /// An asap draft has no time at all, which is different from a time of
-    /// zero and must stay that way through the invite.
     func testAsapDraftCarriesNoTime() {
         let draft = BidePlanDraft(
             destination: Destination(name: "Nats Park", latitude: 38.873, longitude: -77.007)

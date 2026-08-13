@@ -1,9 +1,6 @@
 import XCTest
 @testable import BideKit
 
-/// The claim the whole product rests on: Bide knows when *you* should leave.
-/// It is worked out here, so it can be proved without a device, a network, or
-/// a clock that moves.
 final class BidePlannerTests: XCTestCase {
 
     private let now = Date(timeIntervalSince1970: 1_786_000_000)
@@ -14,6 +11,7 @@ final class BidePlannerTests: XCTestCase {
         _ id: UUID,
         name: String,
         minutesAway: Int?,
+        hasLeft: Bool = false,
         status: ParticipantStatus = .accepted,
         mode: TravelMode = .driving
     ) -> Participant {
@@ -22,6 +20,8 @@ final class BidePlannerTests: XCTestCase {
             displayName: name,
             mode: mode,
             etaTimestamp: minutesAway.map { now.addingTimeInterval(TimeInterval($0 * 60)) },
+            travelTime: minutesAway.map { TimeInterval($0 * 60) },
+            leftAt: hasLeft ? now.addingTimeInterval(-60) : nil,
             status: status,
             updatedAt: now
         )
@@ -47,9 +47,6 @@ final class BidePlannerTests: XCTestCase {
 
     // MARK: - Arrive on time
 
-    /// The everyday case: a time was agreed, so each person leaves their own
-    /// journey ahead of it. Being closer means leaving later — the point of
-    /// the app.
     func testOnTimeLeavesYourOwnJourneyBeforeTheAgreedTime() {
         let state = bide(
             scheduledFor: now.addingTimeInterval(60 * 60),
@@ -66,8 +63,6 @@ final class BidePlannerTests: XCTestCase {
         XCTAssertFalse(plan.isHeldBack, "an on-time bide never holds anyone back")
     }
 
-    /// Without an ETA of their own there is nothing to subtract, and the plan
-    /// says so rather than guessing at zero.
     func testNoTravelTimeMeansNoDeparture() {
         let state = bide(
             scheduledFor: now.addingTimeInterval(3600),
@@ -79,8 +74,6 @@ final class BidePlannerTests: XCTestCase {
 
     // MARK: - As soon as everyone can
 
-    /// With no agreed time, the target is the longest journey among the people
-    /// going — the only arrival everyone can actually make.
     func testAsapTargetsTheLongestJourney() {
         let state = bide(
             scheduledFor: nil,
@@ -96,7 +89,6 @@ final class BidePlannerTests: XCTestCase {
         XCTAssertEqual(plan.departure, now.addingTimeInterval(30 * 60), "30 minutes on the couch")
     }
 
-    /// Someone who declined must not drag the meeting later.
     func testDeclinedParticipantsDoNotSetTheTarget() {
         let state = bide(
             scheduledFor: nil,
@@ -110,12 +102,86 @@ final class BidePlannerTests: XCTestCase {
         XCTAssertEqual(plan.targetArrival, now.addingTimeInterval(10 * 60))
     }
 
+    // MARK: - Departure
+
+    func testAnAnchoredETAIsNotDeparture() {
+        let state = bide(
+            scheduledFor: now.addingTimeInterval(60 * 60),
+            participants: [participant(me, name: "Ada", minutesAway: 15)]
+        )
+
+        let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 15 * 60, now: now)
+
+        XCTAssertFalse(plan.hasDeparted)
+        XCTAssertEqual(BidePlanner.headline(for: plan, state: state, now: now), "Leave in 45 minutes")
+    }
+
+    func testAnAsapBideSaysLeaveNowUntilTheyActuallyGo() {
+        let state = bide(
+            scheduledFor: nil,
+            participants: [participant(me, name: "Ada", minutesAway: 20)]
+        )
+
+        let waiting = BidePlanner.plan(for: state, me: me, myTravelTime: 20 * 60, now: now)
+        XCTAssertEqual(waiting.departure, now)
+        XCTAssertEqual(BidePlanner.headline(for: waiting, state: state, now: now), "Leave now")
+
+        let gone = BidePlanner.plan(for: state, me: me, myTravelTime: 20 * 60, hasDeparted: true, now: now)
+        XCTAssertEqual(BidePlanner.headline(for: gone, state: state, now: now), "On the way")
+    }
+
+    func testDepartureIsTakenFromTheRowWhenTheCallerDoesNotKnow() {
+        let state = bide(
+            scheduledFor: now.addingTimeInterval(3600),
+            participants: [participant(me, name: "Ada", minutesAway: 15, hasLeft: true)]
+        )
+
+        let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 15 * 60, now: now)
+        XCTAssertTrue(plan.hasDeparted)
+    }
+
+    func testArrivalMovesWithTheClockUntilTheyLeave() {
+        let state = bide(
+            scheduledFor: now.addingTimeInterval(3600),
+            participants: [participant(me, name: "Ada", minutesAway: 15)]
+        )
+
+        let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 15 * 60, now: now)
+        XCTAssertEqual(plan.arrival, now.addingTimeInterval(15 * 60))
+
+        let later = now.addingTimeInterval(30 * 60)
+        let stillAtHome = BidePlanner.plan(for: state, me: me, myTravelTime: 15 * 60, now: later)
+        XCTAssertEqual(
+            stillAtHome.arrival,
+            later.addingTimeInterval(15 * 60),
+            "standing still doesn't get you any closer"
+        )
+    }
+
     // MARK: - Arrive at the same time
 
-    /// Nobody moves until the furthest person has set off. "Has set off" is
-    /// the presence of an ETA — the engine only produces one for someone in
-    /// motion.
-    func testTogetherHoldsEveryoneUntilTheFurthestLeaves() {
+    func testTogetherHoldsEveryoneUntilTheFurthestActuallyLeaves() {
+        let state = bide(
+            scheduledFor: now.addingTimeInterval(3600),
+            style: .together,
+            participants: [
+                participant(me, name: "Ada", minutesAway: 10),
+                participant(them, name: "Sarah", minutesAway: 50),
+            ]
+        )
+
+        let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 10 * 60, now: now)
+
+        XCTAssertTrue(plan.isHeldBack)
+        XCTAssertNil(plan.departure)
+        XCTAssertEqual(plan.waitingOn?.userID, them)
+        XCTAssertEqual(
+            BidePlanner.headline(for: plan, state: state, now: now),
+            "Waiting for Sarah to leave"
+        )
+    }
+
+    func testTogetherWaitsOnAnyoneWithoutAnEstimate() {
         let state = bide(
             scheduledFor: now.addingTimeInterval(3600),
             style: .together,
@@ -129,27 +195,54 @@ final class BidePlannerTests: XCTestCase {
 
         XCTAssertTrue(plan.isHeldBack)
         XCTAssertEqual(plan.waitingOn?.userID, them)
-        XCTAssertEqual(
-            BidePlanner.headline(for: plan, state: state, now: now),
-            "Waiting for Sarah to leave"
-        )
     }
 
-    /// Once they're moving, everyone else gets a real leave time.
     func testTogetherReleasesOnceTheFurthestHasLeft() {
         let state = bide(
             scheduledFor: now.addingTimeInterval(3600),
             style: .together,
             participants: [
                 participant(me, name: "Ada", minutesAway: 10),
-                participant(them, name: "Sarah", minutesAway: 50),
+                participant(them, name: "Sarah", minutesAway: 50, hasLeft: true),
             ]
         )
 
         let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 10 * 60, now: now)
 
         XCTAssertFalse(plan.isHeldBack)
-        XCTAssertEqual(plan.departure, now.addingTimeInterval(50 * 60))
+        XCTAssertEqual(plan.targetArrival, now.addingTimeInterval(50 * 60))
+        XCTAssertEqual(plan.departure, now.addingTimeInterval(40 * 60), "10 minutes behind Sarah")
+        XCTAssertEqual(BidePlanner.headline(for: plan, state: state, now: now), "Leave in 40 minutes")
+    }
+
+    func testTogetherSaysLeaveNowWhenTheFurthestIsAsCloseAsYouAre() {
+        let state = bide(
+            scheduledFor: now.addingTimeInterval(3600),
+            style: .together,
+            participants: [
+                participant(me, name: "Ada", minutesAway: 10),
+                participant(them, name: "Sarah", minutesAway: 10, hasLeft: true),
+            ]
+        )
+
+        let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 10 * 60, now: now)
+        XCTAssertEqual(BidePlanner.headline(for: plan, state: state, now: now), "Leave now")
+    }
+
+    func testTheFurthestPersonIsNotHeldBackByThemselves() {
+        let state = bide(
+            scheduledFor: now.addingTimeInterval(3600),
+            style: .together,
+            participants: [
+                participant(me, name: "Ada", minutesAway: 50),
+                participant(them, name: "Sarah", minutesAway: 10),
+            ]
+        )
+
+        let plan = BidePlanner.plan(for: state, me: me, myTravelTime: 50 * 60, now: now)
+
+        XCTAssertFalse(plan.isHeldBack)
+        XCTAssertEqual(plan.departure, now.addingTimeInterval(10 * 60))
     }
 
     // MARK: - Headlines

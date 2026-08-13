@@ -1,45 +1,56 @@
 import SwiftUI
 import BideKit
 
-/// An active bide, as it appears in the app's session list and — the same
-/// component, deliberately — on the lock screen.
-///
-/// The design brief asks for the in-app feed to "copy the live activity feed",
-/// so the two are one view rather than two that drift.
+/// Shared active-session card used in the app and on the Lock Screen.
 public struct BideSessionCard: View {
 
     private let headline: String
-    /// Where the bide is going. The headline is about *time* — "Leave in 10
-    /// minutes" — and on its own it leaves the reader to remember what for, so
-    /// the place gets a line of its own rather than being implied.
+    /// Destination displayed separately from the timing headline.
     private let destination: String?
+    /// Note shown when other sessions share this journey, such as
+    /// "1 of 2 groups going here".
+    private let companionNote: String?
     private let participants: [Participant]
-    /// The local user's id, so their own place in the roster reads "You".
+    /// Local user identifier used to label their roster entry as "You".
     private let me: UUID?
+    /// Shared scheduled arrival, or `nil` for an ASAP bide.
+    private let scheduledArrival: Date?
     private let isLive: Bool
     private let showsBadge: Bool
+    /// Whether the local user is following rather than attending.
+    private let isWatching: Bool
     private let now: Date
-    /// Nil in the Live Activity, where the whole card is the tap target.
+    /// Optional tap action; the containing Live Activity handles taps itself.
     private let onTap: (() -> Void)?
+    /// Optional share action for a solo bide.
+    private let onShare: (() -> Void)?
 
     public init(
         headline: String,
         destination: String? = nil,
+        companionNote: String? = nil,
         participants: [Participant],
         me: UUID? = nil,
+        scheduledArrival: Date? = nil,
         isLive: Bool = false,
         showsBadge: Bool = true,
+        isWatching: Bool = false,
         now: Date = Date(),
-        onTap: (() -> Void)? = nil
+        onTap: (() -> Void)? = nil,
+        onShare: (() -> Void)? = nil
     ) {
         self.headline = headline
         self.destination = destination
+        self.companionNote = companionNote
         self.participants = participants
         self.me = me
+        self.scheduledArrival = scheduledArrival
         self.isLive = isLive
         self.showsBadge = showsBadge
+        self.isWatching = isWatching
         self.now = now
         self.onTap = onTap
+        self.onShare = onShare
     }
 
     public init(
@@ -52,9 +63,12 @@ public struct BideSessionCard: View {
         self.init(
             headline: Self.headline(for: state, leaveAt: leaveAt, now: now),
             destination: state.destinationName,
-            participants: state.participants.filter { $0.status != .declined },
+            companionNote: nil,
+            participants: state.roster,
             me: me,
-            isLive: state.travellers.contains { $0.etaTimestamp != nil },
+            scheduledArrival: state.scheduledFor,
+            // Mark the session live only after a traveller has departed.
+            isLive: state.travellers.contains(where: \.hasLeft),
             now: now,
             onTap: onTap
         )
@@ -82,11 +96,35 @@ public struct BideSessionCard: View {
                             .foregroundStyle(BideColor.secondaryText)
                             .multilineTextAlignment(.center)
                     }
+                    if let companionNote, !companionNote.isEmpty {
+                        Text(companionNote)
+                            .font(BideFont.caption)
+                            .foregroundStyle(BideColor.secondaryText.opacity(0.75))
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 .frame(maxWidth: .infinity)
 
-                if showsBadge && isLive {
-                    LivePill()
+                if showsBadge {
+                    // The watcher badge takes priority over the movement badge.
+                    if isWatching {
+                        WatchingPill()
+                    } else if isLive {
+                        LivePill()
+                    }
+                }
+
+                if let onShare {
+                    Button(action: onShare) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(BideColor.secondaryText)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Share this Bide so someone can track it")
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
 
@@ -95,28 +133,37 @@ public struct BideSessionCard: View {
             }
         }
         .bideCard()
-    }
-
-    /// Up to four across; more than that wraps, which is the honest answer to
-    /// a group bide until the "how do we handle large groups" question in the
-    /// design notes is settled.
-    private var roster: some View {
-        LazyVGrid(
-            columns: Array(
-                repeating: GridItem(.flexible(), spacing: 12),
-                count: min(max(participants.count, 1), 4)
-            ),
-            spacing: 14
-        ) {
-            ForEach(participants) { participant in
-                ParticipantTile(participant: participant, me: me, now: now)
+        // Reinforce watcher state with a subtle, non-warning border.
+        .overlay {
+            if isWatching {
+                RoundedRectangle(cornerRadius: BideMetrics.cardRadius, style: .continuous)
+                    .strokeBorder(BideColor.watching.opacity(0.55), lineWidth: 1.5)
             }
         }
     }
 
-    /// "Leave in 10 minutes" / "Leave tomorrow at 3:00 PM" / "Waiting for
-    /// everyone to answer". Never the destination — that has its own line now,
-    /// so naming it here would only say it twice.
+    /// Displays up to three participant tiles per row to keep ETA labels legible.
+    private var roster: some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.flexible(), spacing: 12),
+                count: min(max(participants.count, 1), 3)
+            ),
+            spacing: 14
+        ) {
+            ForEach(participants) { participant in
+                ParticipantTile(
+                    participant: participant,
+                    me: me,
+                    scheduledArrival: scheduledArrival,
+                    now: now
+                )
+            }
+        }
+    }
+
+    /// Builds a reduced headline for surfaces that do not run ``BidePlanner``.
+    /// - Parameter leaveAt: The local user's future departure time, if available.
     static func headline(for state: BideState, leaveAt: Date?, now: Date) -> String {
         if state.isComplete { return "Everyone's here" }
         if let leaveAt { return BideFormat.leavePhrase(at: leaveAt, now: now) }
@@ -135,6 +182,8 @@ public struct BideSessionCard: View {
             mode: .transit,
             etaTimestamp: Date().addingTimeInterval(45 * 60),
             baselineETA: Date().addingTimeInterval(40 * 60),
+            travelTime: 45 * 60,
+            leftAt: Date().addingTimeInterval(-5 * 60),
             status: .accepted
         ),
     ]
@@ -144,6 +193,7 @@ public struct BideSessionCard: View {
             headline: "Leave in 10 minutes",
             destination: "Nats Park",
             participants: participants,
+            scheduledArrival: Date().addingTimeInterval(50 * 60),
             isLive: true
         )
         BideSessionCard(

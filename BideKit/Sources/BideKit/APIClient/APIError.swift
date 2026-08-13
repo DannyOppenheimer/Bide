@@ -1,48 +1,39 @@
 import Foundation
 
-/// Everything ``BideAPI`` can fail with. Exhaustive on purpose: callers switch
-/// over this to decide whether to retry, re-authenticate, or show the user
-/// something, and a stringly-typed error makes that a guessing game.
+/// Typed failures returned by ``BideAPI``.
 public enum APIError: Error, Equatable, Sendable {
 
-    /// No signed-in session, or the server rejected the one we sent (401).
-    /// Refresh the session and retry.
+    /// The session is missing or was rejected with HTTP 401.
     case notAuthenticated
 
-    /// The request was refused by row-level security (403). Retrying without
-    /// changing anything will fail the same way.
+    /// Row-level security rejected the request with HTTP 403.
     case notPermitted
 
-    /// No such bide, or one you can't see. Row-level security deliberately
-    /// makes those two cases indistinguishable — a bide you aren't part of
-    /// reads as absent rather than forbidden, which is the point.
+    /// The bide does not exist or is hidden by row-level security.
     case notFound
 
     /// The write collided with an existing row (409).
     case conflict
 
-    /// Too many requests (429), with the server's retry hint when it gave one.
+    /// HTTP 429, with the server's optional retry hint.
     case rateLimited(retryAfter: TimeInterval?)
 
-    /// The server failed or answered in a way we don't handle.
+    /// The server failed or returned an unsupported response.
     case serverError(status: Int, message: String?)
 
-    /// The request never completed: offline, timed out, cancelled, TLS failure.
-    /// Generally worth retrying.
+    /// The request did not complete because of a network-layer failure.
     case transport(URLError)
 
-    /// The server answered, but not with what we expected.
+    /// The server returned an unexpected response.
     case invalidResponse(String)
 
-    /// A response body didn't match the model we decode it into.
+    /// A response body did not match its expected model.
     case decodingFailed(String)
 
-    /// A request body couldn't be encoded. A programming error, not a runtime
-    /// condition.
+    /// A request body could not be encoded.
     case encodingFailed(String)
 
-    /// The client is misconfigured — a project URL that can't form a valid
-    /// endpoint, for instance.
+    /// The client configuration cannot produce a valid request.
     case invalidConfiguration(String)
 }
 
@@ -69,7 +60,13 @@ extension APIError: LocalizedError {
         }
     }
 
-    /// Whether retrying the identical request could plausibly succeed.
+    /// Whether the request was intentionally cancelled by its caller.
+    public var isCancellation: Bool {
+        guard case .transport(let error) = self else { return false }
+        return error.code == .cancelled
+    }
+
+    /// Whether retrying the same request might succeed.
     public var isRetryable: Bool {
         switch self {
         case .transport, .rateLimited, .serverError:
@@ -81,8 +78,7 @@ extension APIError: LocalizedError {
     }
 }
 
-/// The error shape PostgREST returns, used to sharpen a bare status code into
-/// something specific.
+/// Error payload returned by PostgREST.
 struct PostgRESTError: Decodable, Equatable {
     let code: String?
     let message: String?

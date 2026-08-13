@@ -1,10 +1,6 @@
 import CoreLocation
 
-/// Where a bide is headed.
-///
-/// The one place in Bide where coordinates are a first-class value, and they
-/// describe a *place* — somewhere both people agreed on in a text thread —
-/// never a person. Nothing in this package models a participant's position.
+/// A named meeting place. These coordinates never represent a participant's location.
 public struct Destination: Equatable, Sendable, Hashable {
 
     public let name: String
@@ -27,6 +23,16 @@ public struct Destination: Equatable, Sendable, Hashable {
 
     public var location: CLLocation {
         CLLocation(latitude: latitude, longitude: longitude)
+    }
+
+    /// Radius within which two records count as the same meeting place.
+    /// One venue has several map entries whose coordinates disagree by a block.
+    public static let samePlaceRadius: CLLocationDistance = 100
+
+    /// Whether two destinations describe one meeting place.
+    /// Compared by distance rather than name, which varies by search result.
+    public func isSamePlace(as other: Destination) -> Bool {
+        location.distance(from: other.location) <= Self.samePlaceRadius
     }
 }
 

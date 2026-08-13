@@ -2,38 +2,20 @@ import ActivityKit
 import Foundation
 import BideKit
 
-/// Starts, updates, and ends the Live Activity.
-///
-/// Lives in the container app because it has to: the Messages extension can't
-/// touch ActivityKit at all. Everything here is local — the app updates its own
-/// activity while it's running. Push-to-start and push updates need an APNs key
-/// that isn't wired up yet; when it is, this is the one file that changes.
+/// Manages local Live Activities from the container app.
+/// Remote starts and updates are not configured.
 @MainActor
 final class LiveActivityController {
 
     private var activities: [UUID: Activity<BideActivityAttributes>] = [:]
 
-    /// How far ahead of leaving to put a bide on the lock screen. Any earlier
-    /// and it's clutter; any later and it isn't a warning.
+    /// Maximum time before departure for starting a Live Activity.
     private static let leadTime: TimeInterval = 2 * 60 * 60
 
-    /// How long the numbers on the lock screen are worth believing.
-    ///
-    /// Everything in the content is an estimate anchored at the moment it was
-    /// pushed. Other people's ETAs in particular only move when this app is
-    /// running and polling, so a phone in a pocket for half an hour leaves a
-    /// lock screen quietly asserting where everyone was half an hour ago —
-    /// with no way for the reader to tell. `staleDate` is how the system is
-    /// told that: past it, iOS dims the activity and marks it out of date, so
-    /// old numbers look old instead of looking current.
-    ///
-    /// Fifteen minutes: comfortably more than the ETA engine's slowest
-    /// re-anchor cadence (10 minutes, walking), so a bide that is being
-    /// tracked normally never trips it.
+    /// Content freshness limit, longer than the slowest normal ETA refresh cadence.
     private static let contentLifetime: TimeInterval = 15 * 60
 
-    /// - Parameter me: The local user's id, so their own row on the lock
-    ///   screen reads "You" rather than their name or a placeholder.
+    /// - Parameter me: Local user identifier used to label their row as "You".
     func start(state: BideState, plan: BidePlan, me: UUID? = nil, now: Date = Date()) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         guard activities[state.bideID] == nil else {
@@ -41,7 +23,7 @@ final class LiveActivityController {
             return
         }
 
-        // Don't take over someone's lock screen for a meetup that's tomorrow.
+        // Do not start activities before the configured lead time.
         if let departure = plan.departure, departure.timeIntervalSince(now) > Self.leadTime {
             return
         }
@@ -50,7 +32,8 @@ final class LiveActivityController {
             activities[state.bideID] = try Activity.request(
                 attributes: BideActivityAttributes(
                     bideID: state.bideID,
-                    destinationName: state.destinationName
+                    destinationName: state.destinationName,
+                    scheduledFor: state.scheduledFor
                 ),
                 content: ActivityContent(
                     state: content(for: state, plan: plan, me: me, now: now),
@@ -59,8 +42,7 @@ final class LiveActivityController {
                 pushType: nil
             )
         } catch {
-            // Denied, or too many activities already. Not fatal: the app and
-            // the tile still work, so this stays quiet rather than throwing.
+            // Activity denial or capacity does not prevent the rest of the app from working.
         }
     }
 
@@ -98,10 +80,13 @@ final class LiveActivityController {
     ) -> BideActivityAttributes.ContentState {
         BideActivityAttributes.ContentState(
             headline: BidePlanner.headline(for: plan, state: state, now: now),
-            participants: state.participants
-                .filter { $0.status != .declined }
+            participants: state.roster
                 .map { ActivityParticipant(participant: $0, me: me, now: now) },
-            leaveAt: plan.isHeldBack ? nil : plan.departure,
+            // Stop showing a departure countdown after travel begins.
+            leaveAt: plan.isHeldBack || plan.hasDeparted ? nil : plan.departure,
+            myTravelTime: plan.travelTime,
+            myArrival: plan.arrival,
+            hasDeparted: plan.hasDeparted,
             isComplete: state.isComplete
         )
     }

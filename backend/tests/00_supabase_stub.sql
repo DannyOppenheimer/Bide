@@ -1,6 +1,4 @@
--- Minimal stand-in for the parts of a Supabase project the migrations rely on.
--- Not shipped — this exists so the real migrations can run against plain
--- Postgres and have their policies exercised.
+-- Minimal Supabase auth and role stub for testing migrations in plain PostgreSQL.
 
 create schema if not exists auth;
 
@@ -9,7 +7,7 @@ create table auth.users (
   email text
 );
 
--- Supabase reads the caller's identity out of the request JWT.
+-- Read the caller's identity from the request JWT, as Supabase does.
 create function auth.uid() returns uuid
 language sql stable
 as $$

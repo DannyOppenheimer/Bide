@@ -1,7 +1,0 @@
-# Every tile URL points at /meet, and Cloudflare Pages serves that path from
-# meet.html directly — no redirect, so the address bar keeps the exact URL the
-# recipient was sent, query string and all.
-#
-# The bare root is only reached by someone typing the domain, with no payload
-# to preserve, so a rewrite is fine there.
-/  /meet.html  200

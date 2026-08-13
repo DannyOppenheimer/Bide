@@ -1,15 +1,11 @@
 import Foundation
 
-/// Every user-visible time string Bide produces.
-///
-/// Centralised because the same phrase appears in three places that can't
-/// share a view — the tile in the transcript, the app, and the Live Activity —
-/// and three drifting copies of "Leave in 10 minutes" would be obvious.
+/// Shared formatting for user-visible dates, durations, statuses, and names.
 public enum BideFormat {
 
     // MARK: - Dates
 
-    /// "May 7th" — or "Today" / "Tomorrow" when it's one of those.
+    /// Formats a date as "Today", "Tomorrow", or a month and ordinal day.
     public static func day(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
         if calendar.isDate(date, inSameDayAs: now) { return "Today" }
         if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now),
@@ -22,21 +18,26 @@ public enum BideFormat {
         return "\(month) \(ordinal(dayNumber))"
     }
 
-    /// "3:30 PM", in the user's own 12/24-hour setting.
+    /// Formats a time using the user's locale and 12/24-hour preference.
     public static func time(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)
     }
 
-    /// The tile's second line: "May 7th · 3:30 pm", or "As soon as everyone
-    /// can" when no time was set.
+    /// Formats a group schedule, treating missing or past dates as soon as possible.
     public static func schedule(_ date: Date?, now: Date = Date()) -> String {
-        guard let date else { return "As soon as everyone can" }
+        guard let date, date > now else { return "As soon as everyone can" }
+        return "\(day(date, now: now)) · \(time(date))"
+    }
+
+    /// Formats a solo-trip schedule from a watcher's perspective.
+    public static func soloSchedule(_ date: Date?, now: Date = Date()) -> String {
+        guard let date, date > now else { return "As soon as they can" }
         return "\(day(date, now: now)) · \(time(date))"
     }
 
     // MARK: - Durations
 
-    /// "45 minutes", "1 hr 5 min", "Under a minute".
+    /// Formats a duration for general display, such as "45 minutes".
     public static func duration(_ interval: TimeInterval) -> String {
         let seconds = max(0, interval)
         if seconds < 60 { return "Under a minute" }
@@ -51,9 +52,47 @@ public enum BideFormat {
         return remainder == 0 ? "\(hours) hr" : "\(hours) hr \(remainder) min"
     }
 
-    /// What the countdown says: "Leave now", "Leave in 10 minutes", or —
-    /// once it's far enough out that a countdown is useless — "Leave tomorrow
-    /// at 3:00 PM".
+    /// Formats a duration for the narrower roster layout, such as "14 min".
+    public static func shortDuration(_ interval: TimeInterval) -> String {
+        let seconds = max(0, interval)
+        if seconds < 60 { return "Under a min" }
+
+        let minutes = Int((seconds / 60).rounded())
+        if minutes < 60 { return "\(minutes) min" }
+
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(hours) hr" : "\(hours) hr \(remainder) min"
+    }
+
+    /// Formats a duration for the compact Dynamic Island slot, such as "14m".
+    public static func compactDuration(_ interval: TimeInterval) -> String {
+        let minutes = Int((max(0, interval) / 60).rounded())
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
+    }
+
+    // MARK: - Participant status text
+
+    /// Formats the scheduled arrival label.
+    public static func scheduledLine(_ date: Date) -> String {
+        "Scheduled ETA: \(time(date))"
+    }
+
+    /// Formats the current projected arrival label.
+    public static func actualLine(_ date: Date) -> String {
+        "Actual: \(time(date))"
+    }
+
+    /// Labels the projected arrival only when a scheduled time exists for comparison.
+    /// - Parameter scheduled: The scheduled arrival time, or `nil` for an ASAP bide.
+    public static func arrivalLine(_ date: Date, comparedTo scheduled: Date?) -> String {
+        scheduled == nil ? time(date) : actualLine(date)
+    }
+
+    /// Formats a departure as an immediate instruction, countdown, or date and time.
     public static func leavePhrase(at departure: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
         let interval = departure.timeIntervalSince(now)
 
@@ -64,39 +103,35 @@ public enum BideFormat {
         return "Leave \(dayPart) at \(time(departure))"
     }
 
-    /// How a person's own line reads in the roster: their ETA, or that they
-    /// haven't set off.
+    /// Formats a participant's journey state for the roster and accessibility labels.
     public static func participantStatus(_ participant: Participant, now: Date = Date()) -> String {
         switch participant.status {
         case .invited: "Waiting..."
         case .declined: "Not coming"
         case .arrived: "Arrived"
+        // Watchers are normally absent from rosters but still need accessible text.
+        case .watching: "Following along"
         case .accepted:
-            participant.etaTimestamp.map { duration($0.timeIntervalSince(now)) } ?? "Waiting..."
+            participant.remainingTravel(now: now).map(duration) ?? "Waiting..."
         }
     }
 
     // MARK: - Names
 
-    /// What to call someone who never set a name. Used rather than inventing
-    /// one, and rather than showing a raw identifier.
+    /// Display name used when a participant has no profile name.
     public static let anonymousName = "Someone"
 
-    /// What to call the person reading the screen. Wins over their own display
-    /// name: a roster is read to find out where everyone *else* has got to, and
-    /// "You" is what makes your own row skimmable.
+    /// Display name used for the local participant.
     public static let selfName = "You"
 
-    /// - Parameter me: The local user's id, when the caller knows it. Anywhere
-    ///   the reader could be in the list — a roster, the Live Activity — pass
-    ///   it, or an anonymous user sees themselves as "Someone".
+    /// - Parameter me: The local user's identifier, when available.
     public static func name(_ participant: Participant, me: UUID? = nil) -> String {
         if participant.userID == me { return selfName }
         let trimmed = participant.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (trimmed?.isEmpty == false ? trimmed : nil) ?? anonymousName
     }
 
-    /// The single letter in the avatar circle.
+    /// Returns the first display-name character for an avatar.
     public static func initial(_ participant: Participant, me: UUID? = nil) -> String {
         String(name(participant, me: me).prefix(1)).uppercased()
     }

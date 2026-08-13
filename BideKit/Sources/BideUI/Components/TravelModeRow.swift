@@ -1,12 +1,7 @@
 import SwiftUI
 import BideKit
 
-/// The row of travel modes from the reference screens.
-///
-/// Every mode in ``TravelMode/displayOrder`` is drawn, but only the selectable
-/// ones respond. Cycling, flights and trains are shown dimmed rather than
-/// hidden: the row is part of the brand, and a gap where an icon used to be
-/// reads as a bug where a dimmed icon reads as "not yet".
+/// Displays travel modes in design order, dimming modes that are unavailable.
 public struct TravelModeRow: View {
 
     @Binding private var selection: TravelMode

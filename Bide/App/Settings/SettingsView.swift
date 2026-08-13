@@ -2,8 +2,7 @@ import SwiftUI
 import BideKit
 import BideUI
 
-/// Settings, reachable only when signed in — there's nothing here for an
-/// identity that lives on one device.
+/// Settings available to users with a durable account.
 struct SettingsView: View {
 
     let store: BideStore
@@ -40,7 +39,9 @@ struct SettingsView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear { displayName = profile.displayName ?? "" }
+        .onAppear { prefill() }
+        // Refresh a blank field when account restoration provides a name.
+        .onChange(of: auth.accountDisplayName) { _, _ in prefill() }
     }
 
     private var displayNameSection: some View {
@@ -124,13 +125,19 @@ struct SettingsView: View {
         await createFromCalendar()
     }
 
-    /// Converts what's already on the calendar, so turning the switch on does
-    /// something visible rather than promising to later.
+    /// Converts currently eligible calendar events immediately after opt-in.
     private func createFromCalendar() async {
         for (eventID, draft) in await scanner.upcomingDrafts() {
             await store.create(draft, isSolo: true)
             scanner.markConverted(eventID)
         }
+    }
+
+    /// Prefills a blank field from local storage or account metadata without
+    /// overwriting in-progress edits.
+    private func prefill() {
+        guard displayName.isEmpty else { return }
+        displayName = profile.displayName ?? auth.accountDisplayName ?? ""
     }
 
     private func save() {
@@ -140,6 +147,8 @@ struct SettingsView: View {
 
         Task {
             await store.updateDisplayName(trimmed)
+            // Persist account metadata so another installation can recover the name.
+            await auth.remember(displayName: trimmed)
             dismiss()
         }
     }

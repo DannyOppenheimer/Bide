@@ -1,17 +1,12 @@
 import Foundation
 
-/// Where the refresh token lives between launches.
-///
-/// An anonymous identity *is* the refresh token: lose it and the user loses
-/// every bide they were part of, because there is no email or Apple ID to
-/// recover the account from.
+/// Persists the refresh token that identifies a session between launches.
 public protocol AuthTokenStore: Sendable {
     func loadRefreshToken() -> String?
     func save(refreshToken: String?)
 }
 
-/// Keychain-backed store. The default, because a refresh token that grants a
-/// permanent identity does not belong in `UserDefaults`.
+/// Keychain-backed token storage used in production.
 public struct KeychainTokenStore: AuthTokenStore {
 
     private let service: String
@@ -58,14 +53,13 @@ public struct KeychainTokenStore: AuthTokenStore {
 
         var insert = baseQuery
         insert[kSecValueData as String] = data
-        // Available after first unlock so a push-triggered launch can refresh,
-        // but never synced to another device — the identity is this install's.
+        // Permit background refresh after first unlock without syncing the token.
         insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         SecItemAdd(insert as CFDictionary, nil)
     }
 }
 
-/// Non-persistent store, for tests and previews.
+/// In-memory token storage for tests and previews.
 public final class InMemoryTokenStore: AuthTokenStore, @unchecked Sendable {
 
     private let lock = NSLock()
@@ -86,22 +80,8 @@ public final class InMemoryTokenStore: AuthTokenStore, @unchecked Sendable {
 
 // MARK: - Session provider
 
-/// Holds the user's identity and keeps the access token fresh.
-///
-/// Two ways in, both producing a real `auth.uid()` that every row-level
-/// security policy is written against:
-///
-/// - **Anonymous**, the default. Nobody is asked to make an account before
-///   they've seen the app work. The identity lives in the keychain, which
-///   outlives not just relaunches but *deleting the app* — iOS does not clear
-///   keychain items on uninstall. So a reinstall resumes the same user and the
-///   same bides come back down from the server, which is the answer to "why is
-///   last week's meetup still here after I wiped the build". `signOut()` is
-///   the only thing that forgets it.
-/// - **Sign in with Apple**, via ``signInWithApple(idToken:nonce:)``, which is
-///   the same identity on every device the user owns.
-///
-/// An actor so that concurrent callers can't race into signing in twice.
+/// Manages anonymous or Apple-backed identities and refreshes access tokens.
+/// Actor isolation prevents concurrent authentication and refresh races.
 public actor BideAuthProvider: BideSessionProvider {
 
     private struct CachedSession {
@@ -117,7 +97,7 @@ public actor BideAuthProvider: BideSessionProvider {
 
     private var cached: CachedSession?
 
-    /// Renew this far ahead of expiry, so a token can't lapse mid-request.
+    /// Refresh margin that prevents a token from expiring during a request.
     private static let refreshMargin: TimeInterval = 60
 
     public init(
@@ -141,10 +121,7 @@ public actor BideAuthProvider: BideSessionProvider {
             do {
                 return try await exchange(refreshToken: refreshToken)
             } catch APIError.notAuthenticated {
-                // The token was genuinely rejected, so this identity is gone
-                // and a new one is the only way forward. Any other failure —
-                // offline, timeout, 500 — must NOT land here: silently minting
-                // a new identity would strand the user's existing bides.
+                // Replace the identity only when the refresh token is explicitly rejected.
                 clearStoredIdentity()
             }
         }
@@ -152,22 +129,9 @@ public actor BideAuthProvider: BideSessionProvider {
         return try await signInAnonymously()
     }
 
-    /// Exchanges an Apple identity token for a Bide session.
-    ///
-    /// This is the native flow: `ASAuthorizationAppleIDProvider` produces the
-    /// token on-device and Supabase verifies it against Apple's public keys,
-    /// so nothing secret is needed in the app. The only server-side setup is
-    /// enabling Apple as a provider and listing this app's bundle ID as an
-    /// authorised client — see `docs/apple-sign-in-setup.md`.
-    ///
-    /// - Parameter nonce: The *raw* nonce whose SHA-256 hash was handed to
-    ///   `ASAuthorizationAppleIDRequest`. Apple echoes the hash inside the
-    ///   token and Supabase checks the two against each other, which is what
-    ///   stops a stolen token being replayed.
-    ///
-    /// Any bides created while anonymous stay with the anonymous identity —
-    /// this signs in *as* the Apple user rather than merging the two. Linking
-    /// them is a later job, and a visible one, so it isn't done quietly here.
+    /// Exchanges an Apple identity token for a Bide session without merging an
+    /// existing anonymous account. See `docs/apple-sign-in-setup.md`.
+    /// - Parameter nonce: Raw nonce whose SHA-256 hash was sent to Apple.
     public func signInWithApple(idToken: String, nonce: String) async throws(APIError) -> BideSession {
         let body: Data
         do {
@@ -188,7 +152,66 @@ public actor BideAuthProvider: BideSessionProvider {
         )
     }
 
-    /// Drops the cached and stored identity. The next call signs in afresh.
+    /// Persists the display name in account metadata so it survives new sessions.
+    public func record(displayName: String?) async throws(APIError) {
+        let session = try await currentSession()
+
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(DisplayNameUpdate(displayName: displayName))
+        } catch {
+            throw APIError.encodingFailed(String(describing: error))
+        }
+
+        guard var components = URLComponents(url: configuration.projectURL, resolvingAgainstBaseURL: false) else {
+            throw APIError.invalidConfiguration("project URL is not a valid URL: \(configuration.projectURL)")
+        }
+        components.path = "/auth/v1/user"
+        guard let url = components.url else {
+            throw APIError.invalidConfiguration("could not build an endpoint for /auth/v1/user")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.httpBody = body
+        request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let response: HTTPURLResponse
+        do {
+            (_, response) = try await transport.send(request)
+        } catch let error as APIError {
+            throw error
+        } catch let error as URLError {
+            throw APIError.transport(error)
+        } catch is CancellationError {
+            throw APIError.transport(URLError(.cancelled))
+        } catch {
+            throw APIError.invalidResponse(String(describing: error))
+        }
+
+        guard (200..<300).contains(response.statusCode) else {
+            throw APIError.serverError(status: response.statusCode, message: nil)
+        }
+
+        // Keep the cached session consistent with the updated metadata.
+        if let cached {
+            self.cached = CachedSession(
+                session: BideSession(
+                    userID: cached.session.userID,
+                    accessToken: cached.session.accessToken,
+                    isAnonymous: cached.session.isAnonymous,
+                    displayName: displayName
+                ),
+                refreshToken: cached.refreshToken,
+                expiresAt: cached.expiresAt
+            )
+        }
+    }
+
+    /// Clears the identity so the next request creates a new session.
     public func signOut() {
         cached = nil
         store.save(refreshToken: nil)
@@ -226,20 +249,11 @@ public actor BideAuthProvider: BideSessionProvider {
         )
     }
 
-    /// What a 400/401/403 from `/auth/v1` *means*, which depends entirely on
-    /// what was sent.
+    /// Controls how authentication failures are interpreted for each credential type.
     private enum AuthFailure {
-        /// A refresh token the server no longer recognises. There is nothing
-        /// to explain and nothing the user can do: the identity is gone, and
-        /// ``currentSession()`` catches ``APIError/notAuthenticated`` to mint a
-        /// new one.
+        /// A rejected refresh token means the stored identity is no longer valid.
         case identityLost
-        /// A token the server was just handed and refused — and it says why:
-        /// "Provider is not enabled", "Unacceptable audience in id_token".
-        /// Those name their own fix, so they must survive the mapping. Folding
-        /// them into `notAuthenticated` was the difference between a sign-in
-        /// failure that tells you the Apple provider is switched off and one
-        /// that says "try again" forever.
+        /// A rejected new credential should preserve the server's explanation.
         case explained
     }
 
@@ -297,7 +311,8 @@ public actor BideAuthProvider: BideSessionProvider {
         let session = BideSession(
             userID: userID,
             accessToken: token.accessToken,
-            isAnonymous: token.user.isAnonymous ?? true
+            isAnonymous: token.user.isAnonymous ?? true,
+            displayName: token.user.metadata?.displayName
         )
         cached = CachedSession(
             session: session,
@@ -314,15 +329,11 @@ public actor BideAuthProvider: BideSessionProvider {
 
         switch status {
         case 400, 401, 403:
-            // A refresh token the server no longer recognises is the only one
-            // of these that means "signed out". The rest are the server
-            // explaining what it wants, and the explanation is the whole value
-            // of the response.
+            // Only a rejected refresh token maps to a lost identity.
             guard case .explained = failure, let message else { return .notAuthenticated }
             return .serverError(status: status, message: message)
         case 422:
-            // The most likely one during setup: anonymous sign-ins are turned
-            // off in the project's auth settings.
+            // Often indicates disabled anonymous sign-in during project setup.
             return .serverError(status: status, message: message)
         case 429:
             return .rateLimited(retryAfter: nil)
@@ -336,14 +347,33 @@ public actor BideAuthProvider: BideSessionProvider {
 
 private struct TokenResponse: Decodable {
     struct User: Decodable {
+        /// Account metadata returned by GoTrue on each sign-in.
+        struct Metadata: Decodable {
+            let fullName: String?
+            let name: String?
+
+            enum CodingKeys: String, CodingKey {
+                case fullName = "full_name"
+                case name
+            }
+
+            /// First nonempty name component used in compact roster layouts.
+            var displayName: String? {
+                let raw = (fullName ?? name)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let raw, !raw.isEmpty else { return nil }
+                return raw.split(separator: " ").first.map(String.init) ?? raw
+            }
+        }
+
         let id: String
-        /// Absent on older GoTrue builds, where every session this app could
-        /// have was anonymous anyway.
+        /// Optional for compatibility with older GoTrue responses.
         let isAnonymous: Bool?
+        let metadata: Metadata?
 
         enum CodingKeys: String, CodingKey {
             case id
             case isAnonymous = "is_anonymous"
+            case metadata = "user_metadata"
         }
     }
 
@@ -360,8 +390,25 @@ private struct TokenResponse: Decodable {
     }
 }
 
-/// GoTrue reports errors under `msg` or `error_description`, not the `message`
-/// PostgREST uses.
+/// Encodes GoTrue metadata under `data`, using JSON null to clear `full_name`.
+private struct DisplayNameUpdate: Encodable {
+    let displayName: String?
+
+    private enum CodingKeys: String, CodingKey { case data }
+    private enum MetadataKeys: String, CodingKey { case fullName = "full_name" }
+
+    func encode(to encoder: Encoder) throws {
+        var root = encoder.container(keyedBy: CodingKeys.self)
+        var data = root.nestedContainer(keyedBy: MetadataKeys.self, forKey: .data)
+        if let displayName {
+            try data.encode(displayName, forKey: .fullName)
+        } else {
+            try data.encodeNil(forKey: .fullName)
+        }
+    }
+}
+
+/// Error payload returned by GoTrue across its supported field names.
 private struct GoTrueError: Decodable {
     let msg: String?
     let message: String?

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bide — Know when to leave.</title>
+<meta name="description" content="Bide helps you know when to leave.">
+<meta name="theme-color" content="#1D1D1F">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="/favicon-32x32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<!-- Invitation pages use server-rendered metadata from functions/trip.js. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Bide">
+<meta property="og:title" content="Bide">
+<meta property="og:description" content="Know when to leave.">
+<meta property="og:url" content="https://trybide.app/">
+<meta property="og:image" content="https://trybide.app/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  /* Colors mirror BideTheme. */
+  :root {
+    --background: #1D1D1F;
+    --foreground: #FFFFFF;
+    --muted: #8E8E93;
+    --button-border: rgba(255, 255, 255, 0.18);
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    min-height: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100svh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    padding: 2rem 1.5rem;
+    text-align: center;
+  }
+
+  .landing {
+    min-height: 100vh;
+    min-height: 100svh;
+    justify-content: center;
+  }
+
+  .landing-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    transform: translateY(clamp(-1.75rem, -3svh, -1rem));
+  }
+
+  .mark {
+    display: block;
+    width: 5rem;
+    height: auto;
+    margin-bottom: 2.35rem;
+    overflow: visible;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 2.5rem;
+    font-weight: 750;
+    line-height: 0.95;
+    letter-spacing: -0.055em;
+  }
+
+  .tagline-cube {
+    --tagline-origin-z: -0.65em;
+    position: relative;
+    width: min(100%, 32rem);
+    margin-top: 0.85rem;
+    perspective: 20rem;
+    transform-style: preserve-3d;
+  }
+
+  .tagline {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.8125rem;
+    font-weight: 400;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+  }
+
+  .tagline-sizer {
+    position: relative;
+    display: block;
+    visibility: hidden;
+  }
+
+  .tagline-face {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backface-visibility: hidden;
+    transform-origin: 50% 50% var(--tagline-origin-z);
+    transition: transform 700ms ease-in-out, opacity 700ms ease-in-out;
+    will-change: transform, opacity;
+  }
+
+  .tagline-face--current {
+    opacity: 1;
+    transform: rotateX(0deg);
+  }
+
+  .tagline-face--next {
+    opacity: 0;
+    transform: rotateX(90deg);
+  }
+
+  .tagline-cube.is-turning .tagline-face--current {
+    opacity: 0;
+    transform: rotateX(-90deg);
+  }
+
+  .tagline-cube.is-turning .tagline-face--next {
+    opacity: 1;
+    transform: rotateX(0deg);
+  }
+
+  .tagline-cube.is-resetting .tagline-face {
+    transition: none;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .source-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    min-height: 2.125rem;
+    margin-top: 2rem;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid var(--button-border);
+    border-radius: 0.35rem;
+    color: var(--foreground);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    transition: background-color 160ms ease, border-color 160ms ease, transform 160ms ease;
+  }
+
+  .source-link svg {
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+  }
+
+  .source-link:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--foreground);
+  }
+
+  .source-link:active {
+    transform: translateY(1px);
+  }
+
+  .source-link:focus-visible {
+    outline: 2px solid var(--foreground);
+    outline-offset: 4px;
+  }
+
+  @media (max-width: 30rem) {
+    main {
+      padding: 1.5rem 1rem;
+    }
+  }
+
+  @media (min-width: 48rem) {
+    .mark {
+      width: 7rem;
+      margin-bottom: 3rem;
+    }
+
+    h1 {
+      font-size: 3.5rem;
+    }
+
+    .tagline-cube {
+      margin-top: 1rem;
+    }
+
+    .tagline {
+      font-size: 1.0625rem;
+    }
+
+    .source-link {
+      margin-top: 2.75rem;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .source-link,
+    .tagline-face {
+      transition: none;
+    }
+  }
+</style>
+</head>
+<body>
+  <main class="landing">
+    <div class="landing-content">
+      <svg class="mark" viewBox="0 0 112 12" role="img" aria-label="Bide logo">
+        <path d="M5 6H107" stroke="currentColor" stroke-width="2"/>
+        <circle cx="5" cy="6" r="5" fill="currentColor"/>
+        <circle cx="39" cy="6" r="5" fill="currentColor"/>
+        <circle cx="73" cy="6" r="5" fill="currentColor"/>
+        <circle cx="107" cy="6" r="5" fill="currentColor"/>
+      </svg>
+
+      <h1>Bide</h1>
+      <div class="tagline-cube" data-tagline-cube>
+        <span class="visually-hidden" data-tagline-accessible>Know when to leave.</span>
+        <span class="tagline tagline-sizer" aria-hidden="true" data-tagline-sizer>
+          The last text you'll send before you leave.
+        </span>
+        <span
+          class="tagline tagline-face tagline-face--current"
+          aria-hidden="true"
+          data-tagline-current
+        >Know when to leave.</span>
+        <span
+          class="tagline tagline-face tagline-face--next"
+          aria-hidden="true"
+          data-tagline-next
+        ></span>
+      </div>
+
+      <a
+        class="source-link"
+        href="https://github.com/DannyOppenheimer/Bide"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="View Bide source code on GitHub"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor" d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.28-1.7-1.28-1.7-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.95.1-.75.4-1.25.73-1.54-2.57-.29-5.27-1.28-5.27-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.16 1.18A10.98 10.98 0 0 1 12 6.12c.98 0 1.95.13 2.87.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.71 5.38-5.29 5.67.42.36.79 1.06.79 2.14v3.27c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/>
+        </svg>
+        <span>Source Code</span>
+      </a>
+    </div>
+  </main>
+
+<script>
+  (function () {
+    var cube = document.querySelector('[data-tagline-cube]');
+    if (!cube) return;
+
+    var taglines = [
+      'Know when to leave.',
+      "You've got more time than you think.",
+      'Stay on the couch a little longer.',
+      "The last text you'll send before you leave.",
+      'No more "where are you?"',
+      'Stop guessing. Start relaxing.',
+      'Never leave too early again.',
+      'Wait less. Rush less.',
+      'The "how far are you" text, automated.',
+      'Because someone always leaves too early.',
+      'Coordinate less. Meet on time.',
+      'Get one more scroll in.'
+    ];
+    var interval = 4000;
+    var duration = 700;
+
+    for (var i = taglines.length - 1; i > 0; i -= 1) {
+      var randomIndex = Math.floor(Math.random() * (i + 1));
+      var shuffled = taglines[i];
+      taglines[i] = taglines[randomIndex];
+      taglines[randomIndex] = shuffled;
+    }
+
+    var index = 0;
+    var currentFace = cube.querySelector('[data-tagline-current]');
+    var nextFace = cube.querySelector('[data-tagline-next]');
+    var accessibleText = cube.querySelector('[data-tagline-accessible]');
+    var sizer = cube.querySelector('[data-tagline-sizer]');
+    var longestTagline = taglines.reduce(function (longest, tagline) {
+      return tagline.length > longest.length ? tagline : longest;
+    }, '');
+
+    currentFace.textContent = taglines[index];
+    nextFace.textContent = taglines[index + 1];
+    accessibleText.textContent = taglines[index];
+    sizer.textContent = longestTagline;
+
+    function updateDepth() {
+      cube.style.setProperty('--tagline-origin-z', cube.offsetHeight / -2 + 'px');
+    }
+
+    function finishTurn() {
+      cube.classList.add('is-resetting');
+      cube.classList.remove('is-turning');
+
+      currentFace.classList.replace('tagline-face--current', 'tagline-face--next');
+      nextFace.classList.replace('tagline-face--next', 'tagline-face--current');
+
+      var previousFace = currentFace;
+      currentFace = nextFace;
+      nextFace = previousFace;
+      index = (index + 1) % taglines.length;
+
+      accessibleText.textContent = taglines[index];
+      nextFace.textContent = taglines[(index + 1) % taglines.length];
+
+      // Apply the reset before restoring transitions to hide the face swap.
+      void cube.offsetWidth;
+      cube.classList.remove('is-resetting');
+      window.setTimeout(turn, interval);
+    }
+
+    function turn() {
+      cube.classList.add('is-turning');
+      window.setTimeout(finishTurn, duration);
+    }
+
+    updateDepth();
+    window.addEventListener('resize', updateDepth);
+
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      window.setTimeout(turn, interval);
+    }
+  })();
+</script>
+</body>
+</html>

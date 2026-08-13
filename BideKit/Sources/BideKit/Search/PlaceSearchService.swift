@@ -1,11 +1,8 @@
 import Foundation
 import MapKit
 
-/// One row in the location search results.
-///
-/// Not `Sendable`: it carries the `MKLocalSearchCompletion` it came from, and
-/// that isn't. It doesn't need to be — suggestions are main-actor UI state
-/// from the moment they exist until the moment they're resolved.
+/// One place-search result. It remains main-actor state because its MapKit
+/// completion is not `Sendable`.
 public struct PlaceSuggestion: Identifiable, Equatable {
 
     public let id: String
@@ -14,9 +11,7 @@ public struct PlaceSuggestion: Identifiable, Equatable {
     /// "1500 South Capitol St SE, Washington, DC".
     public let subtitle: String
 
-    /// The completion this came from, kept so it can be resolved to
-    /// coordinates without re-running the search. Not `Sendable`, so this type
-    /// stays main-actor-bound in practice — which it is, being UI state.
+    /// Original completion retained for coordinate resolution.
     let completion: MKLocalSearchCompletion?
 
     init(completion: MKLocalSearchCompletion) {
@@ -39,17 +34,12 @@ public struct PlaceSuggestion: Identifiable, Equatable {
     }
 }
 
-/// Where-are-we-going search, on Apple Maps' own index.
-///
-/// `MKLocalSearchCompleter` for the as-you-type list, then `MKLocalSearch` to
-/// turn the chosen row into coordinates. Both the container app and the
-/// Messages extension use this — searching for a place is one of the few
-/// things an .appex is allowed to do.
+/// Uses MapKit completion for suggestions and local search for coordinate resolution.
 @MainActor
 @Observable
 public final class PlaceSearchService: NSObject {
 
-    /// What the user has typed. Assigning restarts the search.
+    /// Current query; assigning it refreshes suggestions.
     public var query: String = "" {
         didSet {
             guard query != oldValue else { return }
@@ -70,19 +60,17 @@ public final class PlaceSearchService: NSObject {
 
     public override init() {
         super.init()
-        // Places and addresses only. `.query` would offer things like "coffee
-        // near me", which can't be resolved to one destination.
+        // Restrict results to entries that resolve to one destination.
         completer.resultTypes = [.pointOfInterest, .address]
         completer.delegate = self
     }
 
-    /// Biases results towards where the user is, so "the park" means the one
-    /// down the road. Optional — search works without it.
+    /// Optionally biases results toward a coordinate.
     public func focus(on coordinate: CLLocationCoordinate2D, radius: CLLocationDistance = 50_000) {
         completer.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: radius, longitudinalMeters: radius)
     }
 
-    /// Turns a chosen row into a real destination with coordinates.
+    /// Resolves a suggestion to a destination with coordinates.
     public func resolve(_ suggestion: PlaceSuggestion) async throws -> Destination {
         guard let completion = suggestion.completion else {
             throw PlaceSearchError.notResolvable
@@ -93,8 +81,7 @@ public final class PlaceSearchService: NSObject {
             throw PlaceSearchError.notResolvable
         }
 
-        // The completion's own title is what the user tapped, so it reads
-        // better on a tile than whatever the map item is called internally.
+        // Preserve the title selected by the user.
         return Destination(name: suggestion.title, coordinate: item.placemark.coordinate)
     }
 
@@ -106,7 +93,7 @@ public final class PlaceSearchService: NSObject {
 }
 
 public enum PlaceSearchError: Error, Sendable {
-    /// The chosen row has no coordinates behind it.
+    /// The selected suggestion could not be resolved to coordinates.
     case notResolvable
 }
 
@@ -114,10 +101,8 @@ public enum PlaceSearchError: Error, Sendable {
 
 extension PlaceSearchService: MKLocalSearchCompleterDelegate {
 
-    // The completer delivers on the queue it was created on, which is the main
-    // queue — this class is main-actor bound. Both methods reach for
-    // `self.completer` rather than the parameter, which is the same object but
-    // would have to cross an isolation boundary to be used in here.
+    // The main actor creates the completer, so its delegate callbacks run on the
+    // main queue. Use the isolated property instead of crossing the parameter.
     nonisolated public func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
         MainActor.assumeIsolated {
             suggestions = self.completer.results.map(PlaceSuggestion.init(completion:))
@@ -126,8 +111,7 @@ extension PlaceSearchService: MKLocalSearchCompleterDelegate {
     }
 
     nonisolated public func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: any Error) {
-        // Every keystroke cancels the previous request; that isn't a failure
-        // worth showing anyone.
+        // Query replacement commonly triggers throttling and should not show an error.
         let throttled = (error as? MKError)?.code == .loadingThrottled
         MainActor.assumeIsolated {
             guard !throttled else { return }

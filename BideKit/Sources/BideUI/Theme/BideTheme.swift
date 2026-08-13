@@ -1,45 +1,41 @@
 import SwiftUI
 import BideKit
 
-/// Bide's visual constants, sampled from the Figma reference screens.
-///
-/// The design notes say the reference files are rough — different fonts and
-/// colours between screens — so this is the arbitration. Nothing in the app,
-/// the extension, or the Live Activity should name a colour, a size, or a
-/// radius that isn't here.
+/// Shared color tokens for the app, extension, and Live Activity.
 public enum BideColor {
 
-    /// Every Bide surface sits on this. Fixed, not adaptive: the tile renders
-    /// inside Messages, which is light, and the brand is dark regardless.
+    /// Fixed brand background used in both light and dark system appearances.
     public static let background = Color(hex: 0x1D1D1F)
 
     /// Cards, sheets, and the tile body.
     public static let surface = Color(hex: 0x2C2C2E)
 
-    /// Controls resting on a surface — chips, the search field, the unselected
-    /// mode buttons.
+    /// Background for chips, fields, and unselected controls.
     public static let control = Color(hex: 0x333333)
 
-    /// The selected mode button, one step brighter than a control.
+    /// Background for selected controls.
     public static let controlSelected = Color(hex: 0x48484A)
 
     public static let primaryText = Color.white
     public static let secondaryText = Color(hex: 0x8E8E93)
     public static let tertiaryText = Color(hex: 0x6D6D73)
 
-    /// Text and icons drawn on a white button.
+    /// Text and icons displayed on light controls.
     public static let inverseText = Color(hex: 0x0A0A0A)
 
-    /// The LIVE pill, straight out of the Figma.
+    /// Live-status badge color.
     public static let live = Color(hex: 0xEB4E3D)
+
+    /// Watcher accent, distinct from delay-status colors.
+    public static let watching = Color(hex: 0x5E9CFF)
 
     /// Avatar circles.
     public static let avatar = Color(hex: 0x8E8E93)
 
-    /// Hairline borders, e.g. the Decline button's outline.
+    /// Hairline border color.
     public static let border = Color.white.opacity(0.18)
 
-    /// The three states a time can be in.
+    /// Color associated with a delay grade.
     public static func delay(_ grade: DelayGrade) -> Color {
         switch grade {
         case .onSchedule: Color(hex: 0x30D158)
@@ -49,35 +45,36 @@ public enum BideColor {
     }
 }
 
-/// SF Pro throughout, which is what `Font.system` resolves to. Named by role
-/// so a screen never picks a point size directly.
+/// Shared typography tokens using the system font.
 public enum BideFont {
 
     /// The wordmark on the sign-in screen.
     public static let display = Font.system(size: 52, weight: .bold)
-    /// A screen's own title — "Bide" on the main page.
+    /// Primary screen title.
     public static let screenTitle = Font.system(size: 34, weight: .bold)
-    /// "Active Bide Sessions", "Create Solo-Bide".
+    /// Section heading.
     public static let sectionTitle = Font.system(size: 17, weight: .semibold)
-    /// A card's headline — "Leave in 10 minutes", "John wants to go to Nats Park".
+    /// Card headline.
     public static let cardTitle = Font.system(size: 16, weight: .semibold)
-    /// Prompts like "Where are we going?".
+    /// Form prompt.
     public static let prompt = Font.system(size: 17, weight: .regular)
     public static let body = Font.system(size: 15, weight: .regular)
-    /// Field labels — "Date", "Time", "Arrival Style".
+    /// Field label.
     public static let label = Font.system(size: 13, weight: .medium)
-    /// Secondary lines under a name or a title.
+    /// Secondary text below names and titles.
     public static let caption = Font.system(size: 13, weight: .regular)
     public static let button = Font.system(size: 17, weight: .semibold)
-    /// A person's name in the roster.
+    /// Participant name.
     public static let personName = Font.system(size: 15, weight: .medium)
-    /// The letter inside an avatar.
+    /// Prominent ETA value in a roster tile.
+    public static let etaValue = Font.system(size: 20, weight: .semibold)
+    /// Avatar initial.
     public static let avatarInitial = Font.system(size: 22, weight: .medium)
-    /// The LIVE pill.
+    /// Live-status badge.
     public static let badge = Font.system(size: 11, weight: .bold)
 }
 
-/// Spacing, radii, and the handful of fixed sizes the design repeats.
+/// Shared spacing, radius, and size tokens.
 public enum BideMetrics {
 
     public static let cardRadius: CGFloat = 20
@@ -97,25 +94,15 @@ public enum BideMetrics {
     public static let modeButtonSize: CGFloat = 40
     public static let avatarSize: CGFloat = 52
 
-    /// How far tile content sits below its own top edge, on top of the usual
-    /// padding. Messages draws the sending app's badge over the top-left
-    /// corner of a live-layout bubble, and it is not ours to move — so the
-    /// content moves instead.
+    /// Extra top inset that clears Messages' app badge in live-layout bubbles.
     public static let tileBadgeClearance: CGFloat = 14
 
-    /// The height of a Live Activity's box on the Lock Screen.
-    ///
-    /// A fixed box, not a ceiling: the system neither grows nor shrinks it to
-    /// suit. Content taller than this is *clipped*, from both ends — the mark
-    /// off the top, the ETAs off the bottom, while the middle looks perfectly
-    /// fine. Content shorter leaves a band of empty background under it. So
-    /// the Lock Screen layout has to fill this exactly rather than merely come
-    /// in under it, which is what the spacers in `LockScreenView` are for.
+    /// Fixed Lock Screen Live Activity height; excess content is clipped.
     public static let liveActivityMaxHeight: CGFloat = 160
 }
 
 extension Color {
-    /// `0xRRGGBB`, the form the design references are written in.
+    /// Creates a color from an `0xRRGGBB` value.
     init(hex: UInt32) {
         self.init(
             .sRGB,
@@ -128,7 +115,7 @@ extension Color {
 }
 
 extension View {
-    /// The standard dark card: surface fill, brand radius.
+    /// Applies the standard card padding, fill, and corner radius.
     public func bideCard(
         padding: CGFloat = BideMetrics.cardPadding,
         radius: CGFloat = BideMetrics.cardRadius
@@ -139,15 +126,12 @@ extension View {
             .background(BideColor.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 
-    /// Paints Bide's background behind a whole screen, ignoring safe areas so
-    /// it reaches the edges.
+    /// Applies the brand background through all safe areas.
     public func bideBackground() -> some View {
         background(BideColor.background.ignoresSafeArea())
     }
 
-    /// Text-field trimmings for the place search. Wrapped because these are
-    /// iOS-only modifiers and BideUI still has to compile on macOS, where the
-    /// package's tests run.
+    /// Applies platform-appropriate place-search input behavior.
     func bideSearchInput() -> some View {
         #if os(iOS)
         self
@@ -159,7 +143,7 @@ extension View {
         #endif
     }
 
-    /// A compact navigation title on iOS, the platform default elsewhere.
+    /// Uses an inline navigation title on iOS and the platform default elsewhere.
     func bideInlineNavigationTitle() -> some View {
         #if os(iOS)
         self.navigationBarTitleDisplayMode(.inline)

@@ -1,5 +1,4 @@
--- Exercises the policies as real users. Every check raises on failure, so a
--- clean run means the whole file passed.
+-- Exercises RLS as authenticated and anonymous users. Each failed check raises.
 
 \set ON_ERROR_STOP on
 
@@ -29,9 +28,7 @@ begin
 end;
 $$;
 
--- ---------------------------------------------------------------------------
--- The privacy invariant, enforced as a test rather than a comment.
--- ---------------------------------------------------------------------------
+-- Privacy invariant
 do $$
 declare
   offending text;
@@ -53,9 +50,7 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Alice creates a bide.
--- ---------------------------------------------------------------------------
+-- Bide creation
 do $$
 declare
   v_bide public.bides;
@@ -84,9 +79,7 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Bob is a stranger until he joins.
--- ---------------------------------------------------------------------------
+-- Access before and after joining
 do $$
 begin
   perform pg_temp.become('22222222-2222-2222-2222-222222222222');
@@ -106,9 +99,7 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Write only your own participant row.
--- ---------------------------------------------------------------------------
+-- Participant write permissions
 do $$
 declare
   v_denied boolean := false;
@@ -118,7 +109,6 @@ declare
 begin
   perform pg_temp.become('22222222-2222-2222-2222-222222222222');
 
-  -- Own row: allowed, and updated_at is maintained by the trigger.
   select updated_at into v_before from public.participants
    where bide_id = 'aaaaaaaa-0000-0000-0000-000000000001'
      and user_id = '22222222-2222-2222-2222-222222222222';
@@ -140,7 +130,6 @@ begin
         and user_id = '22222222-2222-2222-2222-222222222222') = v_eta);
   perform pg_temp.check('trigger overrides a client-supplied updated_at', v_after > v_before);
 
-  -- Someone else's row: the USING clause filters it out, so nothing happens.
   update public.participants
      set eta_timestamp = 'epoch', status = 'arrived'
    where bide_id = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -151,7 +140,6 @@ begin
       where bide_id = 'aaaaaaaa-0000-0000-0000-000000000001'
         and user_id = '11111111-1111-1111-1111-111111111111') = 'accepted');
 
-  -- Inserting a row on someone else's behalf is refused outright.
   begin
     insert into public.participants (bide_id, user_id, mode)
     values ('aaaaaaaa-0000-0000-0000-000000000001', '33333333-3333-3333-3333-333333333333', 'walking');
@@ -160,7 +148,6 @@ begin
   end;
   perform pg_temp.check('cannot add someone else as a participant', v_denied);
 
-  -- Deleting someone else's row is likewise filtered out.
   delete from public.participants
    where bide_id = 'aaaaaaaa-0000-0000-0000-000000000001'
      and user_id = '11111111-1111-1111-1111-111111111111';
@@ -169,18 +156,9 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Joining is idempotent, and does not go through ON CONFLICT.
--- ---------------------------------------------------------------------------
--- Regression guard for the reason public.join_bide exists.
---
--- A newcomer upserting their OWN row — the natural way to make joining
--- idempotent — is refused, even though a plain INSERT of the identical row is
--- allowed. ON CONFLICT has to look for a conflicting row, and the SELECT
--- policy hides every row in a bide you haven't joined yet, so the statement is
--- rejected before the INSERT branch is ever reached. Someone who is ALREADY a
--- participant can see those rows, and their upsert succeeds — which is why
--- this only bites the exact case joining cares about.
+-- Idempotent joining
+-- A newcomer's `ON CONFLICT` lookup is blocked because RLS hides participant
+-- rows until they join. The RPC avoids that lookup with UPDATE followed by INSERT.
 do $$
 declare
   v_denied boolean := false;
@@ -209,7 +187,6 @@ declare
 begin
   perform pg_temp.become('22222222-2222-2222-2222-222222222222');
 
-  -- join_bide on a bide you are already in refreshes the mode.
   select * into v_bide from public.join_bide('aaaaaaaa-0000-0000-0000-000000000001', 'walking', 'accepted');
   perform pg_temp.check('join_bide returns the bide', v_bide.id = 'aaaaaaaa-0000-0000-0000-000000000001');
   perform pg_temp.check('join_bide refreshes travel mode',
@@ -223,7 +200,6 @@ begin
 end
 $$;
 
--- A newcomer joining through the function, rather than a raw insert.
 do $$
 declare
   v_bide public.bides;
@@ -236,7 +212,6 @@ begin
   perform pg_temp.check('newcomer can now read the bide',
     (select count(*) from public.bides where id = 'aaaaaaaa-0000-0000-0000-000000000001') = 1);
 
-  -- Joining a bide that does not exist trips the foreign key.
   begin
     perform public.join_bide('aaaaaaaa-0000-0000-0000-00000000dead', 'driving', 'accepted');
   exception when foreign_key_violation then
@@ -244,16 +219,13 @@ begin
   end;
   perform pg_temp.check('join_bide on a missing bide raises a foreign key violation', v_missing);
 
-  -- Put things back for the checks that follow.
   delete from public.participants
    where bide_id = 'aaaaaaaa-0000-0000-0000-000000000001'
      and user_id = '33333333-3333-3333-3333-333333333333';
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Mallory holds no invite and gets nothing.
--- ---------------------------------------------------------------------------
+-- Outsider access
 do $$
 declare
   v_denied boolean := false;
@@ -267,7 +239,6 @@ begin
   perform pg_temp.check('membership helper is false for outsiders',
     public.is_bide_participant('aaaaaaaa-0000-0000-0000-000000000001') = false);
 
-  -- A bide attributed to someone else is refused.
   begin
     insert into public.bides (id, destination_name, lat, lng, created_by)
     values ('aaaaaaaa-0000-0000-0000-000000000002', 'Fake', 1, 2,
@@ -279,9 +250,7 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Devices are private to their owner.
--- ---------------------------------------------------------------------------
+-- Device privacy
 do $$
 declare
   v_denied boolean := false;
@@ -310,9 +279,7 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- Unauthenticated access.
--- ---------------------------------------------------------------------------
+-- Unauthenticated access
 do $$
 declare
   v_denied boolean := false;
@@ -337,9 +304,170 @@ begin
 end
 $$;
 
--- ---------------------------------------------------------------------------
--- delete_me(). Last, because it destroys the rows everything above asserts on.
--- ---------------------------------------------------------------------------
+-- Bide edit permissions
+do $$
+declare
+  v_denied boolean := false;
+begin
+  perform pg_temp.become('22222222-2222-2222-2222-222222222222');
+
+  update public.bides
+     set destination_name = 'Union Market', lat = 38.908, lng = -76.997,
+         scheduled_for = now() + interval '2 hours'
+   where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+
+  perform pg_temp.check('a participant may edit a shared bide',
+    (select destination_name from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000001') = 'Union Market');
+
+  begin
+    update public.bides set created_by = '22222222-2222-2222-2222-222222222222'
+     where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  exception when insufficient_privilege then
+    v_denied := true;
+  end;
+  perform pg_temp.check('nobody may reassign a bide''s creator', v_denied);
+
+  v_denied := false;
+  begin
+    update public.bides set arrival_style = 'together'
+     where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  exception when insufficient_privilege then
+    v_denied := true;
+  end;
+  perform pg_temp.check('nobody may change arrival style after the fact', v_denied);
+
+  perform pg_temp.become('33333333-3333-3333-3333-333333333333');
+  update public.bides set destination_name = 'Mallory''s house'
+   where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  perform pg_temp.check('an outsider cannot edit a bide they are not in',
+    (select count(*) from public.bides
+      where destination_name = 'Mallory''s house') = 0);
+end
+$$;
+
+-- Solo-bide edit permissions
+do $$
+begin
+  perform pg_temp.become('11111111-1111-1111-1111-111111111111');
+  perform public.create_bide(
+    'aaaaaaaa-0000-0000-0000-000000000002', 'The gym', 38.9, -77.0,
+    null, 'on_time', true, now(), 'walking'
+  );
+
+  perform pg_temp.become('22222222-2222-2222-2222-222222222222');
+  perform public.join_bide(
+    'aaaaaaaa-0000-0000-0000-000000000002', 'driving', 'watching'
+  );
+
+  update public.bides set destination_name = 'The pub'
+   where id = 'aaaaaaaa-0000-0000-0000-000000000002';
+  perform pg_temp.check('a watcher cannot edit somebody else''s solo bide',
+    (select destination_name from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000002') = 'The gym');
+
+  perform pg_temp.become('11111111-1111-1111-1111-111111111111');
+  update public.bides set destination_name = 'The pub'
+   where id = 'aaaaaaaa-0000-0000-0000-000000000002';
+  perform pg_temp.check('the creator may edit their own solo bide',
+    (select destination_name from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000002') = 'The pub');
+end
+$$;
+
+-- Watcher roles and solo-bide deletion
+do $$
+declare
+  v_denied boolean := false;
+begin
+  perform pg_temp.become('22222222-2222-2222-2222-222222222222');
+
+  perform pg_temp.check('another user may watch a solo bide',
+    (select status from public.participants
+      where bide_id = 'aaaaaaaa-0000-0000-0000-000000000002'
+        and user_id = '22222222-2222-2222-2222-222222222222') = 'watching');
+
+  begin
+    perform public.join_bide(
+      'aaaaaaaa-0000-0000-0000-000000000001', 'walking', 'watching'
+    );
+  exception when check_violation then
+    v_denied := true;
+  end;
+  perform pg_temp.check('a shared bide cannot contain a watcher', v_denied);
+
+  v_denied := false;
+  begin
+    update public.participants set status = 'accepted'
+     where bide_id = 'aaaaaaaa-0000-0000-0000-000000000002'
+       and user_id = '22222222-2222-2222-2222-222222222222';
+  exception when insufficient_privilege then
+    v_denied := true;
+  end;
+  perform pg_temp.check('a solo watcher cannot become a traveller', v_denied);
+
+  perform pg_temp.become('33333333-3333-3333-3333-333333333333');
+  v_denied := false;
+  begin
+    perform public.join_bide(
+      'aaaaaaaa-0000-0000-0000-000000000002', 'walking', 'accepted'
+    );
+  exception when check_violation then
+    v_denied := true;
+  end;
+  perform pg_temp.check('another user may not travel in a solo bide', v_denied);
+
+  perform pg_temp.become('11111111-1111-1111-1111-111111111111');
+  v_denied := false;
+  begin
+    perform public.join_bide(
+      'aaaaaaaa-0000-0000-0000-000000000002', 'walking', 'watching'
+    );
+  exception when check_violation then
+    v_denied := true;
+  end;
+  perform pg_temp.check('a solo creator cannot watch themselves', v_denied);
+
+  perform pg_temp.become('22222222-2222-2222-2222-222222222222');
+
+  update public.bides set destination_name = 'Mallory''s house'
+   where id = 'aaaaaaaa-0000-0000-0000-000000000002';
+  perform pg_temp.check('a watcher still cannot edit what they watch',
+    (select destination_name from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000002') = 'The pub');
+
+  delete from public.bides where id = 'aaaaaaaa-0000-0000-0000-000000000002';
+  perform pg_temp.check('a watcher cannot delete the bide they watch',
+    (select count(*) from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000002') = 1);
+
+  perform pg_temp.become('11111111-1111-1111-1111-111111111111');
+  delete from public.bides where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  perform pg_temp.check('nobody may delete a shared bide',
+    (select count(*) from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000001') = 1);
+
+  delete from public.bides where id = 'aaaaaaaa-0000-0000-0000-000000000002';
+  perform pg_temp.check('the creator may end their own solo bide',
+    (select count(*) from public.bides
+      where id = 'aaaaaaaa-0000-0000-0000-000000000002') = 0);
+  perform pg_temp.check('ending a solo bide clears its audience',
+    (select count(*) from public.participants
+      where bide_id = 'aaaaaaaa-0000-0000-0000-000000000002') = 0);
+
+  v_denied := false;
+  begin
+    update public.participants set status = 'lurking'
+     where bide_id = 'aaaaaaaa-0000-0000-0000-000000000001'
+       and user_id = '11111111-1111-1111-1111-111111111111';
+  exception when check_violation then
+    v_denied := true;
+  end;
+  perform pg_temp.check('status is still a closed set', v_denied);
+end
+$$;
+
+-- Account deletion (last because it removes shared fixtures)
 set session role postgres;
 
 insert into auth.users (id, email) values
@@ -349,7 +477,6 @@ do $$
 declare
   v_denied boolean := false;
 begin
-  -- Dave makes a bide, Bob joins it, Dave registers a device.
   perform pg_temp.become('44444444-4444-4444-4444-444444444444');
   perform public.create_bide(
     'dddddddd-0000-0000-0000-000000000001', 'Union Market', 38.908, -76.997,
@@ -361,9 +488,6 @@ begin
   perform pg_temp.become('22222222-2222-2222-2222-222222222222');
   perform public.join_bide('dddddddd-0000-0000-0000-000000000001', 'driving', 'accepted');
 
-  -- Dave deletes himself. There is no argument to this function, so there is
-  -- nothing a caller can pass to make it delete somebody else — which is what
-  -- the survivors below are really asserting.
   perform pg_temp.become('44444444-4444-4444-4444-444444444444');
   perform public.delete_me();
 
@@ -379,12 +503,9 @@ begin
   perform pg_temp.check('delete_me cascades to their devices',
     not exists (select 1 from public.devices
                  where user_id = '44444444-4444-4444-4444-444444444444'));
-  -- Bob's row went with the bide, not with Bob: the bide was Dave's.
   perform pg_temp.check('a deleted creator takes their bide''s roster with it',
     not exists (select 1 from public.participants
                  where bide_id = 'dddddddd-0000-0000-0000-000000000001'));
-  -- But only the caller is deleted. Bob was in that bide and Alice was not in
-  -- it at all; both are still here.
   perform pg_temp.check('a participant of the deleted bide survives',
     exists (select 1 from auth.users where id = '22222222-2222-2222-2222-222222222222'));
   perform pg_temp.check('everyone else survives',
@@ -392,7 +513,6 @@ begin
   perform pg_temp.check('other people''s bides are untouched',
     exists (select 1 from public.bides where created_by = '11111111-1111-1111-1111-111111111111'));
 
-  -- And nobody who isn't signed in can reach it at all.
   perform set_config('request.jwt.claims', null, false);
   set role anon;
   begin

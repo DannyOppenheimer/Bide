@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 #
-# Applies every migration to a throwaway Postgres and exercises the row-level
-# security policies as real users.
+# Applies every migration to a temporary PostgreSQL instance and tests RLS as
+# real users. The local Supabase stub provides the auth schema and roles, so
+# Docker is the only dependency.
 #
-# This does not need a Supabase project or the Supabase CLI — tests/00_supabase_stub.sql
-# stands in for the pieces of a hosted project the migrations lean on (the
-# `auth` schema, `auth.uid()`, and the anon/authenticated roles). All it needs
-# is Docker.
-#
-#   ./run-tests.sh
+# Usage: ./run-tests.sh
 
 set -euo pipefail
 
@@ -36,7 +32,7 @@ docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
   exit 1
 }
 
-# The stub first, then every migration in filename order, then the assertions.
+# Load the Supabase stub, ordered migrations, then the assertions.
 files=(-f /bide/tests/00_supabase_stub.sql)
 for migration in "$ROOT"/supabase/migrations/*.sql; do
   files+=(-f "/bide/supabase/migrations/$(basename "$migration")")

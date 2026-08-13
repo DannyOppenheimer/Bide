@@ -1,17 +1,12 @@
 import Foundation
 
-/// What "meeting up" means for a given bide. Chosen once by whoever sends the
-/// tile, and it changes what everyone is told to do.
+/// Determines how participant departure times are coordinated.
 public enum ArrivalStyle: String, Codable, Sendable, CaseIterable, Identifiable {
 
-    /// Everyone should be there by the scheduled time. Each person gets their
-    /// own "leave at" derived from their own ETA, so they all land together at
-    /// the time that was agreed.
+    /// Each participant leaves in time to reach the scheduled arrival time.
     case onTime = "on_time"
 
-    /// Everyone should arrive at the same moment, whenever that turns out to
-    /// be. Nobody is told to leave until the person with the longest journey
-    /// sets off; the rest are held back so they aren't left waiting.
+    /// Participants coordinate departures around the longest journey.
     case together
 
     public var id: String { rawValue }
@@ -23,7 +18,7 @@ public enum ArrivalStyle: String, Codable, Sendable, CaseIterable, Identifiable 
         }
     }
 
-    /// One line explaining the consequence, for the compose sheet.
+    /// A short description for the compose sheet.
     public var explanation: String {
         switch self {
         case .onTime: "Everyone gets their own leave time for the hour you picked."

@@ -30,7 +30,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Bide can create leave-time reminders for calendar events that have a location. Events are read on this device and nothing is uploaded.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>

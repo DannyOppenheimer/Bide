@@ -30,7 +30,11 @@ IMPORTANT!!!: Figma's are missing for some of the above things. that's okay, we 
 
 This is mentioned in the open questions section, but we will infer what failed/errors should render as in each flow.
 
-If there are 2 bide sessions that overlap, then the most recently accepted one will override the other one at the same time (same time = similar enough time window that the ETA would be impossible to be at both places at once). They will be "removed" from the other session. This is also true for solo-bides. The user should be prompted "are you sure, this will remove you from X" when they try to accept or create a confliction session.
+If there are 2 bide sessions that overlap **and go to different places**, then the most recently accepted one will override the other one at the same time (same time = similar enough time window that the ETA would be impossible to be at both places at once). They will be "removed" from the other session. This is also true for solo-bides. The user should be prompted "are you sure, this will remove you from X" when they try to accept or create a confliction session.
+
+Overlapping sessions to the *same* place are not a conflict. One person can be coordinating one meetup with two groups, or running their own solo-bide beside a tile they sent, and that is a single journey serving several arrangements. "Same place" is a distance test — within 100m — rather than a name or an exact coordinate, because one venue has several map records that disagree by a block. All of those sessions stay live in the app, share one ETA anchor, and each gets its own Live Activity (newest first, if the system runs out of room). Their meeting times may differ; the app anchors on the earliest, so a person leaving for a 3:00 group shows as on their way to the 3:30 one with an arrival time that says 3:00 — which is true.
+
+A conversation holds at most one Bide at a time. Sending a second one to the same person or group means ending the first, which the extension offers directly: the container app performs the deletion, so anyone who joined or was tracking it loses it. A shared bide that other people have already accepted can only be left rather than deleted, because the server does not let one participant delete other people's arrangement.
 
 # Styling and brand
 Bide's logo is in two forms, as seen in the figma screenshots.
@@ -58,6 +62,7 @@ The text underneath "Bide" should look a face of a cube, and "rotate" to show di
 - The "how far are you" text, automated.
 - Because someone always leaves too early.
 - Coordinate less. Meet on time.
+- Get one more scroll in.
 
 When a tile goes from collapsed to expanded on click in an imessage thread, our logo is always top left centered, but goes from vertical 3 dot to horizontal 4 dot. 
 - This gives an opportunity for a cool transition animation. The one "dot" on the top left should remain static and always there. We can slide-collapse the 2 dots nad line below into it (so in-between it shows as just a dot), and then "slide" the 3 new horizontal dots out sideways as we transition betwen states. (ask questions if neede dto clarify this animation.

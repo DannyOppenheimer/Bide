@@ -1,10 +1,6 @@
 import XCTest
 @testable import BideKit
 
-/// Fails the first few requests with a chosen `URLError`, then answers 200.
-///
-/// A `URLProtocol` rather than a stub transport on purpose: the behaviour under
-/// test lives *inside* ``URLSessionTransport``, so the seam has to be below it.
 private final class FlakyURLProtocol: URLProtocol {
 
     final class State: @unchecked Sendable {
@@ -21,7 +17,6 @@ private final class FlakyURLProtocol: URLProtocol {
             }
         }
 
-        /// How this attempt should end: an error, or nil to succeed.
         func next() -> URLError? {
             lock.withLock {
                 attempts += 1
@@ -73,10 +68,6 @@ final class URLSessionTransportTests: XCTestCase {
         return URLSessionTransport(session: URLSession(configuration: configuration))
     }
 
-    /// The reported bug. URLSession keeps connections pooled and hands one
-    /// back after the far end has quietly closed it; the request fails with
-    /// -1005 before anything is written, and the user — who was never offline
-    /// — is told to check their connection.
     func testReplaysARequestWhoseConnectionWasAlreadyDead() async throws {
         FlakyURLProtocol.state.reset(failures: 1, error: URLError(.networkConnectionLost))
 
@@ -86,8 +77,6 @@ final class URLSessionTransportTests: XCTestCase {
         XCTAssertEqual(FlakyURLProtocol.state.attemptCount, 2, "the dead connection should have been retried")
     }
 
-    /// Once, not forever. A connection that dies twice running is a real
-    /// failure, and hiding it behind retries only delays saying so.
     func testGivesUpAfterASingleReplay() async {
         FlakyURLProtocol.state.reset(failures: 2, error: URLError(.networkConnectionLost))
 
@@ -100,8 +89,6 @@ final class URLSessionTransportTests: XCTestCase {
         XCTAssertEqual(FlakyURLProtocol.state.attemptCount, 2)
     }
 
-    /// A genuine outage is reported straight away. Retrying it would only make
-    /// "you're offline" arrive twice as slowly, and it is the honest answer.
     func testDoesNotReplayAGenuineOutage() async {
         FlakyURLProtocol.state.reset(failures: 1, error: URLError(.notConnectedToInternet))
 

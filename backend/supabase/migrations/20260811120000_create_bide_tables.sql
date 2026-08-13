@@ -1,13 +1,7 @@
--- Core schema for Bide.
+-- Core schema.
 --
--- PRIVACY INVARIANT — read this before adding a column.
--- No table here stores a participant's location, and none ever will. The only
--- coordinates in this schema are `bides.lat` / `bides.lng`, which are the
--- DESTINATION: a place both people agreed on in a text thread, not a person.
--- What a participant reports is `eta_timestamp` — an arrival TIMESTAMP,
--- computed on-device by BideKit's ETA engine. A latitude, longitude,
--- geography/geometry column, heading, speed, or accuracy on `participants`
--- would break the promise the product is built on.
+-- Privacy invariant: the server stores destination coordinates and device-computed
+-- arrival times, never a participant's location, heading, speed, or accuracy.
 
 create table public.bides (
   id uuid primary key default gen_random_uuid(),
@@ -25,8 +19,7 @@ comment on column public.bides.id is
 comment on column public.bides.destination_name is
   'Capped to match the tile URL budget, which truncates names to keep the payload under 1KB.';
 
--- One row per person per bide. This is the table that must never learn where
--- anyone is; it only learns when they expect to arrive.
+-- One row per participant, containing arrival information but no location data.
 create table public.participants (
   bide_id uuid not null references public.bides (id) on delete cascade,
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -44,9 +37,7 @@ comment on column public.participants.eta_timestamp is
 comment on column public.participants.mode is
   'Travel mode, which sets the re-anchor cadence: 5 min driving, 10 min walking.';
 
--- APNs routing. Push is the only delivery channel: the Messages extension
--- cannot register for push or run in the background, so every update reaches
--- the other person through the container app.
+-- APNs routing for the container app, which handles all background delivery.
 create table public.devices (
   user_id uuid not null references auth.users (id) on delete cascade,
   apns_token text not null,
@@ -64,7 +55,7 @@ create index bides_created_by_idx on public.bides (created_by);
 create index participants_user_id_idx on public.participants (user_id);
 create index devices_user_id_idx on public.devices (user_id);
 
--- Keep `updated_at` honest rather than trusting clients to send it.
+-- Set `updated_at` on the server for every update.
 create function public.touch_updated_at()
 returns trigger
 language plpgsql

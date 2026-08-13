@@ -2,8 +2,7 @@ import AuthenticationServices
 import SwiftUI
 import BideUI
 
-/// The first screen — `bide-homescreen`. Wordmark, a tagline that turns like a
-/// face of a cube, and the two ways in.
+/// Onboarding screen for Apple or anonymous sign-in.
 struct SignInView: View {
 
     let auth: AuthController

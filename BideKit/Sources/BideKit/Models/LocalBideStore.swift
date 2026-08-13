@@ -5,9 +5,7 @@ public struct LocalAnswer: Codable, Equatable, Sendable {
 
     public let status: ParticipantStatus
     public let mode: TravelMode
-    /// When this person has to set off, as computed at the moment they
-    /// accepted. Lets the tile in the transcript count down without asking
-    /// anything — a transcript view has no business making network calls.
+    /// Departure time calculated when the participant accepted.
     public let leaveAt: Date?
     public let answeredAt: Date
 
@@ -19,18 +17,11 @@ public struct LocalAnswer: Codable, Equatable, Sendable {
     }
 }
 
-/// Remembers this device's own answers, so a tile can be drawn correctly the
-/// instant it appears.
-///
-/// Deliberately local and deliberately small. The Messages extension and the
-/// container app do *not* share this — they can't, without an App Group, and
-/// the project doesn't provision one — so each keeps the answers it made
-/// itself. The server remains the source of truth for everyone's state; this
-/// only exists so the transcript has something to draw before anyone asks.
+/// Caches this process's answers for immediate tile rendering.
+/// The server remains the authoritative source for participant state.
 public struct LocalBideStore: @unchecked Sendable {
 
-    /// `UserDefaults` is thread-safe, which is what the unchecked conformance
-    /// stands on.
+    /// `UserDefaults` is thread-safe, which supports the unchecked conformance.
     private let defaults: UserDefaults
     private let keyPrefix = "bide.answer."
 

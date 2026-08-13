@@ -1,88 +1,88 @@
 import Foundation
 
-/// Talks to the Bide server.
-///
-/// Only ever transmits an arrival TIMESTAMP, never a location — the schema has
-/// nowhere to put one. The destination's coordinates travel once, when the bide
-/// is created, because a destination is a place both people agreed on rather
-/// than a person.
-///
-/// There are no realtime subscriptions here, by design: the Messages extension
-/// cannot hold a socket, run in the background, or register for push, so every
-/// update reaches the other person as an APNs push handled by the container app.
+/// Server operations for bides and participants.
+/// Participant updates send arrival timestamps and travel duration, never locations.
 public protocol BideAPI: Sendable {
 
-    /// Creates a bide from an invite and joins it as the creator, in one
-    /// transaction.
+    /// Creates a bide and its creator participant in one transaction.
     func createBide(_ invite: BideInvite, mode: TravelMode, isSolo: Bool) async throws(APIError) -> BideState
 
-    /// Joins an existing bide, or answers one you're already in. Idempotent:
-    /// accepting twice updates your travel mode rather than failing, which is
-    /// something a real person does.
+    /// Joins a bide or updates the caller's existing response and travel mode.
     func joinBide(
         bideID: UUID,
         mode: TravelMode,
         status: ParticipantStatus
     ) async throws(APIError) -> BideState
 
-    /// Publishes your own arrival estimate. Writes only your participant row —
-    /// row-level security guarantees it, and the request says so anyway.
+    /// Updates the caller's participant row with journey state.
+    ///
+    /// - Parameters:
+    ///   - travelTime: Most recent on-device journey duration.
+    ///   - leftAt: First detected departure time, repeated unchanged after departure.
     func updateMyETA(
         bideID: UUID,
         arrivingAt: Date?,
         baselineETA: Date?,
+        travelTime: TimeInterval?,
+        leftAt: Date?,
         mode: TravelMode,
         status: ParticipantStatus
     ) async throws(APIError) -> Participant
 
-    /// The bide and everyone in it.
+    /// Updates the shared destination and arrival time. Travel mode remains per-participant.
+    func updateBide(
+        bideID: UUID,
+        destination: Destination,
+        scheduledFor: Date?
+    ) async throws(APIError) -> BideState
+
+    /// Fetches a bide and its participants.
     func fetchBideState(bideID: UUID) async throws(APIError) -> BideState
 
-    /// Every bide you're part of. Row-level security does the filtering: what
-    /// comes back is exactly what you're a participant in.
+    /// Fetches bides visible to the caller through row-level security.
     func fetchMyBides() async throws(APIError) -> [BideState]
 
-    /// Drops out. Used both when someone declines outright and when accepting
-    /// a clashing bide pushes them out of an earlier one.
+    /// Removes the caller from a bide.
     func leaveBide(bideID: UUID) async throws(APIError)
 
-    /// Sets the name shown beside your avatar, across every bide you're in.
+    /// Deletes a caller-owned solo bide and its watcher records.
+    func deleteBide(bideID: UUID) async throws(APIError)
+
+    /// Updates the caller's display name across their participant rows.
     func updateDisplayName(_ name: String) async throws(APIError)
 
-    /// Deletes this account and everything that cascades from it — every bide
-    /// you created, every roster you appeared in, your push tokens.
-    ///
-    /// Irreversible, and wider than ``leaveBide(bideID:)``: a bide you created
-    /// goes for everybody in it, not just for you. There is no argument, on
-    /// purpose — the server takes the subject from `auth.uid()`, so there is
-    /// nothing here that could name somebody else.
+    /// Deletes the authenticated account and all cascading data.
     func deleteMe() async throws(APIError)
 }
 
 extension BideAPI {
 
-    /// The common case: a fresh ETA, still en route.
+    /// Updates an accepted participant's ETA.
     public func updateMyETA(
         bideID: UUID,
         arrivingAt: Date,
         baselineETA: Date?,
+        travelTime: TimeInterval? = nil,
+        leftAt: Date? = nil,
         mode: TravelMode
     ) async throws(APIError) -> Participant {
         try await updateMyETA(
             bideID: bideID,
             arrivingAt: arrivingAt,
             baselineETA: baselineETA,
+            travelTime: travelTime,
+            leftAt: leftAt,
             mode: mode,
             status: .accepted
         )
     }
 
-    /// Creating a shared bide, which is the usual case.
+    /// Creates a shared bide.
     public func createBide(_ invite: BideInvite, mode: TravelMode) async throws(APIError) -> BideState {
         try await createBide(invite, mode: mode, isSolo: false)
     }
 
-    /// Accepting a tile.
+    /// Accepts an invitation.
     public func joinBide(bideID: UUID, mode: TravelMode) async throws(APIError) -> BideState {
         try await joinBide(bideID: bideID, mode: mode, status: .accepted)
     }
@@ -106,11 +106,10 @@ public struct SupabaseAPIClient: BideAPI {
         self.transport = transport
     }
 
-    /// Columns to pull for a full bide, including the embedded participant rows.
-    /// PostgREST resolves `participants(...)` through the foreign key.
+    /// PostgREST selection for a bide with embedded participants.
     private static let bideSelect = """
         id,destination_name,lat,lng,scheduled_for,arrival_style,is_solo,created_at,created_by,\
-        participants(user_id,display_name,mode,eta_timestamp,baseline_eta,status,updated_at)
+        participants(user_id,display_name,mode,eta_timestamp,baseline_eta,travel_seconds,left_at,status,updated_at)
         """
 
     // MARK: Requests
@@ -122,9 +121,7 @@ public struct SupabaseAPIClient: BideAPI {
     ) async throws(APIError) -> BideState {
         let session = try await requireSession()
 
-        // A function call, not two inserts: the bide and the creator's
-        // participant row have to land together, or the creator can't read back
-        // the bide they just made.
+        // The RPC creates the bide and creator participant atomically.
         let body = try encode([
             "p_bide_id": .string(invite.bideID.uuidString),
             "p_destination_name": .string(invite.destinationName),
@@ -146,8 +143,7 @@ public struct SupabaseAPIClient: BideAPI {
         )
         _ = try await performExpectingSuccess(request)
 
-        // The function returns the bide row, but not its participants, so read
-        // the full state back rather than hand callers a half-populated roster.
+        // Fetch again because the RPC response does not embed participants.
         return try await fetchBideState(bideID: invite.bideID)
     }
 
@@ -158,13 +154,8 @@ public struct SupabaseAPIClient: BideAPI {
     ) async throws(APIError) -> BideState {
         let session = try await requireSession()
 
-        // A function rather than an upsert on /participants. PostgREST's
-        // `resolution=merge-duplicates` emits ON CONFLICT DO UPDATE, which
-        // row-level security refuses for a newcomer: the conflict lookup needs
-        // to read rows in a bide they cannot see yet. See the migration.
-        //
-        // The caller's identity is not in the body — join_bide takes it from
-        // auth.uid(), so there is nothing here to forge.
+        // The RPC handles new participants without exposing conflict rows through RLS.
+        // It obtains the participant identity from `auth.uid()`.
         let body = try encode([
             "p_bide_id": .string(bideID.uuidString),
             "p_mode": .string(mode.rawValue),
@@ -187,25 +178,24 @@ public struct SupabaseAPIClient: BideAPI {
         bideID: UUID,
         arrivingAt: Date?,
         baselineETA: Date?,
+        travelTime: TimeInterval?,
+        leftAt: Date?,
         mode: TravelMode,
         status: ParticipantStatus
     ) async throws(APIError) -> Participant {
         let session = try await requireSession()
 
-        // An arrival TIMESTAMP and nothing else about where they are. There is
-        // no column here that could hold a location even if this tried to send
-        // one — see the privacy invariant in the schema.
+        // Departure detection stays on-device; this payload contains no location.
         let body = try encode([
             "eta_timestamp": arrivingAt.map { .string(PostgresTimestamp.string(from: $0)) } ?? .null,
             "baseline_eta": baselineETA.map { .string(PostgresTimestamp.string(from: $0)) } ?? .null,
+            "travel_seconds": travelTime.map { .int(Int($0.rounded())) } ?? .null,
+            "left_at": leftAt.map { .string(PostgresTimestamp.string(from: $0)) } ?? .null,
             "mode": .string(mode.rawValue),
             "status": .string(status.rawValue),
         ])
 
-        // `user_id` is redundant with the update policy, which already limits
-        // this to the caller's own row. It is here so the request states its
-        // intent, and so a policy regression shows up as zero rows updated
-        // rather than as a silent write to someone else's row.
+        // The explicit user filter complements RLS and makes an unexpected match fail closed.
         let request = try makeRequest(
             method: "PATCH",
             path: "/rest/v1/participants",
@@ -221,10 +211,46 @@ public struct SupabaseAPIClient: BideAPI {
         let data = try await performExpectingSuccess(request)
         let updated: [Participant] = try decode(data)
         guard let participant = updated.first else {
-            // Nothing matched: not a participant in this bide, or no such bide.
+            // The caller is not a participant or the bide does not exist.
             throw APIError.notFound
         }
         return participant
+    }
+
+    public func updateBide(
+        bideID: UUID,
+        destination: Destination,
+        scheduledFor: Date?
+    ) async throws(APIError) -> BideState {
+        let session = try await requireSession()
+
+        // Database grants restrict updates to these shared plan fields.
+        // Coordinates describe the destination, never a participant.
+        let body = try encode([
+            "destination_name": .string(destination.name),
+            "lat": .number(destination.latitude),
+            "lng": .number(destination.longitude),
+            "scheduled_for": scheduledFor.map { .string(PostgresTimestamp.string(from: $0)) } ?? .null,
+        ])
+
+        let request = try makeRequest(
+            method: "PATCH",
+            path: "/rest/v1/bides",
+            session: session,
+            queryItems: [URLQueryItem(name: "id", value: "eq.\(bideID.uuidString)")],
+            body: body,
+            prefer: "return=representation"
+        )
+
+        let data = try await performExpectingSuccess(request)
+        let updated: [BideState] = try decode(data)
+        guard updated.first != nil else {
+            // The bide is missing or row-level security denied the update.
+            throw APIError.notFound
+        }
+
+        // Fetch again because the PATCH response does not embed participants.
+        return try await fetchBideState(bideID: bideID)
     }
 
     public func fetchBideState(bideID: UUID) async throws(APIError) -> BideState {
@@ -251,9 +277,7 @@ public struct SupabaseAPIClient: BideAPI {
     public func fetchMyBides() async throws(APIError) -> [BideState] {
         let session = try await requireSession()
 
-        // No `user_id` filter: the read policy already narrows this to bides
-        // the caller participates in. Adding one would imply the server would
-        // otherwise hand over someone else's.
+        // Row-level security limits results to bides visible to the caller.
         let request = try makeRequest(
             method: "GET",
             path: "/rest/v1/bides",
@@ -284,14 +308,28 @@ public struct SupabaseAPIClient: BideAPI {
         _ = try await performExpectingSuccess(request)
     }
 
+    public func deleteBide(bideID: UUID) async throws(APIError) {
+        let session = try await requireSession()
+
+        // The delete policy enforces creator ownership and solo status.
+        let request = try makeRequest(
+            method: "DELETE",
+            path: "/rest/v1/bides",
+            session: session,
+            queryItems: [URLQueryItem(name: "id", value: "eq.\(bideID.uuidString)")],
+            prefer: "return=minimal"
+        )
+
+        _ = try await performExpectingSuccess(request)
+    }
+
     public func updateDisplayName(_ name: String) async throws(APIError) {
         let session = try await requireSession()
 
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = try encode(["display_name": trimmed.isEmpty ? .null : .string(trimmed)])
 
-        // Every row at once: a name belongs to the person, not to one meetup,
-        // and the update policy limits this to rows that are already theirs.
+        // Update every participant row owned by the caller.
         let request = try makeRequest(
             method: "PATCH",
             path: "/rest/v1/participants",
@@ -307,11 +345,7 @@ public struct SupabaseAPIClient: BideAPI {
     public func deleteMe() async throws(APIError) {
         let session = try await requireSession()
 
-        // A function rather than a DELETE on a table: the row that has to go is
-        // in `auth.users`, which no client role may touch. `delete_me` is
-        // `security definer` and takes its subject from auth.uid(), so the
-        // request carries no id and there is nothing in it to forge. Everything
-        // in `public` follows through the cascades — see the migration.
+        // The security-definer RPC deletes `auth.uid()` and lets foreign keys cascade.
         let request = try makeRequest(
             method: "POST",
             path: "/rest/v1/rpc/delete_me",
@@ -382,19 +416,18 @@ public struct SupabaseAPIClient: BideAPI {
         return data
     }
 
-    /// Turns a failed response into the most specific ``APIError`` the body
-    /// supports.
+    /// Maps an HTTP and PostgREST failure to the most specific ``APIError``.
     private static func mapFailure(status: Int, data: Data, response: HTTPURLResponse) -> APIError {
         let failure = try? JSONDecoder().decode(PostgRESTError.self, from: data)
         let message = failure?.message
 
-        // Postgres SQLSTATEs carry more than the HTTP status does.
+        // Prefer specific PostgreSQL error codes over general HTTP status codes.
         switch failure?.code {
         case "42501":
-            // insufficient_privilege — a row-level security refusal.
+            // insufficient_privilege
             return .notPermitted
         case "23503":
-            // foreign_key_violation — joining a bide that doesn't exist.
+            // foreign_key_violation
             return .notFound
         case "23505":
             return .conflict
@@ -454,11 +487,7 @@ public struct SupabaseAPIClient: BideAPI {
 
 // MARK: - Timestamps
 
-/// Postgres renders `timestamptz` as ISO 8601 with a variable number of
-/// fractional-second digits — none at all when the value lands on a whole
-/// second, six when it doesn't. `ISO8601DateFormatter` handles one case or the
-/// other depending on `.withFractionalSeconds`, never both, so parsing takes
-/// two attempts.
+/// Encodes PostgreSQL timestamps and accepts values with or without fractional seconds.
 enum PostgresTimestamp {
 
     private static func formatter(fractionalSeconds: Bool) -> ISO8601DateFormatter {
@@ -482,11 +511,12 @@ enum PostgresTimestamp {
 
 // MARK: - Request bodies
 
-/// A small closed set of JSON values, so request bodies are built without
-/// `Any` and without a bespoke `Encodable` type per endpoint.
+/// JSON values used to build typed request bodies without `Any`.
 enum JSONValue: Encodable, Equatable {
     case string(String)
     case number(Double)
+    /// An integer value that must not be encoded as a floating-point number.
+    case int(Int)
     case bool(Bool)
     case null
 
@@ -495,6 +525,7 @@ enum JSONValue: Encodable, Equatable {
         switch self {
         case .string(let value): try container.encode(value)
         case .number(let value): try container.encode(value)
+        case .int(let value): try container.encode(value)
         case .bool(let value): try container.encode(value)
         case .null: try container.encodeNil()
         }
