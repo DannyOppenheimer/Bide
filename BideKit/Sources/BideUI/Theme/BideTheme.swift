@@ -96,6 +96,22 @@ public enum BideMetrics {
     public static let controlHeight: CGFloat = 44
     public static let modeButtonSize: CGFloat = 40
     public static let avatarSize: CGFloat = 52
+
+    /// How far tile content sits below its own top edge, on top of the usual
+    /// padding. Messages draws the sending app's badge over the top-left
+    /// corner of a live-layout bubble, and it is not ours to move — so the
+    /// content moves instead.
+    public static let tileBadgeClearance: CGFloat = 14
+
+    /// The height of a Live Activity's box on the Lock Screen.
+    ///
+    /// A fixed box, not a ceiling: the system neither grows nor shrinks it to
+    /// suit. Content taller than this is *clipped*, from both ends — the mark
+    /// off the top, the ETAs off the bottom, while the middle looks perfectly
+    /// fine. Content shorter leaves a band of empty background under it. So
+    /// the Lock Screen layout has to fill this exactly rather than merely come
+    /// in under it, which is what the spacers in `LockScreenView` are for.
+    public static let liveActivityMaxHeight: CGFloat = 160
 }
 
 extension Color {

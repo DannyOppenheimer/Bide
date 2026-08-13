@@ -322,6 +322,36 @@ final class APIClientTests: XCTestCase {
         }
     }
 
+    // MARK: deleteMe
+
+    /// The request carries no id, and that is the whole security argument: the
+    /// server takes its subject from `auth.uid()`, so there is nothing in the
+    /// body or the query that could name a different account.
+    func testDeleteMeNamesNobody() async throws {
+        let transport = StubTransport([.init(status: 204, json: "")])
+        try await makeClient(transport: transport).deleteMe()
+
+        let requests = await transport.received
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path(), "/rest/v1/rpc/delete_me")
+        XCTAssertNil(request.url?.query())
+        XCTAssertEqual(body(of: request).count, 0)
+    }
+
+    /// If the migration hasn't been pushed, PostgREST answers 404 for the
+    /// unknown function. That has to arrive as a failure rather than a silent
+    /// success, or a caller believes it deleted an account it didn't.
+    func testDeleteMeFailsLoudlyWhenTheFunctionIsMissing() async {
+        let client = makeClient(transport: StubTransport(
+            status: 404,
+            json: #"{"code":"PGRST202","message":"Could not find the function public.delete_me"}"#
+        ))
+        await XCTAssertThrowsAPIError(.notFound) {
+            try await client.deleteMe()
+        }
+    }
+
     // MARK: updateMyETA
 
     func testUpdateMyETAPatchesOnlyYourOwnRow() async throws {

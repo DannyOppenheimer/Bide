@@ -231,6 +231,73 @@ final class BideAuthProviderTests: XCTestCase {
         }
     }
 
+    /// The one that cost a debugging session: Apple sign-in against a project
+    /// where the Apple provider was never switched on. GoTrue says so, in as
+    /// many words, with a 400 — and a 400 used to be flattened into
+    /// ``APIError/notAuthenticated``, so the app said "try again" forever while
+    /// the server was naming the toggle that had to be flipped.
+    func testAppleProviderDisabledIsReportedClearly() async {
+        let provider = BideAuthProvider(
+            configuration: configuration,
+            transport: ScriptedTransport([
+                .init(
+                    status: 400,
+                    json: #"{"error":"invalid request","error_description":"Unsupported provider: Provider is not enabled"}"#
+                ),
+            ]),
+            store: InMemoryTokenStore()
+        )
+
+        do {
+            _ = try await provider.signInWithApple(idToken: "id-token", nonce: "nonce")
+            XCTFail("expected the 400 to propagate")
+        } catch {
+            XCTAssertEqual(
+                error,
+                .serverError(status: 400, message: "Unsupported provider: Provider is not enabled")
+            )
+        }
+    }
+
+    /// The other one: the provider is on, but this bundle ID isn't in its
+    /// Client IDs list, so the token's audience is refused.
+    func testAppleAudienceRejectionIsReportedClearly() async {
+        let provider = BideAuthProvider(
+            configuration: configuration,
+            transport: ScriptedTransport([
+                .init(
+                    status: 400,
+                    json: #"{"code":400,"error_code":"validation_failed","msg":"Unacceptable audience in id_token"}"#
+                ),
+            ]),
+            store: InMemoryTokenStore()
+        )
+
+        do {
+            _ = try await provider.signInWithApple(idToken: "id-token", nonce: "nonce")
+            XCTFail("expected the 400 to propagate")
+        } catch {
+            XCTAssertEqual(error, .serverError(status: 400, message: "Unacceptable audience in id_token"))
+        }
+    }
+
+    /// A 400 with nothing to say still means "signed out", so the refresh path
+    /// keeps its meaning even under the new mapping.
+    func testUnexplained400StillReadsAsSignedOut() async {
+        let provider = BideAuthProvider(
+            configuration: configuration,
+            transport: ScriptedTransport([.init(status: 400, json: "{}")]),
+            store: InMemoryTokenStore()
+        )
+
+        do {
+            _ = try await provider.signInWithApple(idToken: "id-token", nonce: "nonce")
+            XCTFail("expected the 400 to propagate")
+        } catch {
+            XCTAssertEqual(error, .notAuthenticated)
+        }
+    }
+
     func testSignOutForgetsTheIdentity() async throws {
         let transport = ScriptedTransport([
             .init(json: tokenJSON(accessToken: "at-1", refreshToken: "rt-1")),

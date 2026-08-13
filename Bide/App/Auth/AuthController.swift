@@ -14,7 +14,16 @@ import BideKit
 @Observable
 final class AuthController {
 
-    private(set) var session: BideSession?
+    private(set) var session: BideSession? {
+        didSet {
+            // The Messages extension has no identity of its own and no way to
+            // ask for one, so what it knows about this person's account it
+            // knows from the App Group. Only a real session updates the flag:
+            // a failed restore means "couldn't tell", not "signed out".
+            guard let session else { return }
+            profile.isSignedInWithApple = !session.isAnonymous
+        }
+    }
     private(set) var isWorking = false
     private(set) var errorMessage: String?
 
@@ -62,7 +71,7 @@ final class AuthController {
     /// every write needs an identity even when the user doesn't want an
     /// account.
     func continueWithoutSigningIn() async {
-        await run {
+        await run(describe: { Self.signInFailure($0, fallback: "Couldn't start a Bide session. Try again.") }) {
             self.session = try await self.auth.currentSession()
             self.hasOnboarded = true
         }
@@ -71,10 +80,20 @@ final class AuthController {
     // MARK: - Sign in with Apple
 
     /// Called by `SignInWithAppleButton` before the sheet appears.
+    ///
+    /// `.email` is not optional here, however little Bide wants an address:
+    /// Apple only puts an `email` claim in the identity token when it was
+    /// asked for, and Supabase refuses to create a user from a token without
+    /// one — with a 400, which reads to this app as "not signed in". Ask for
+    /// name alone and sign-in fails every time, on a correctly configured
+    /// project, for a reason nothing in the response names.
+    ///
+    /// "Hide My Email" costs nothing: Apple still sends a claim, just a private
+    /// relay address, and nothing here ever sends mail to it.
     func configure(_ request: ASAuthorizationAppleIDRequest) {
         let nonce = Self.makeNonce()
         pendingNonce = nonce
-        request.requestedScopes = [.fullName]
+        request.requestedScopes = [.fullName, .email]
         request.nonce = Self.sha256(nonce)
     }
 
@@ -96,7 +115,7 @@ final class AuthController {
                 return
             }
 
-            await run {
+            await run(describe: { Self.signInFailure($0, fallback: "Apple couldn't sign you in. Try again.") }) {
                 self.session = try await self.auth.signInWithApple(idToken: idToken, nonce: nonce)
                 self.hasOnboarded = true
                 self.pendingNonce = nil
@@ -117,11 +136,28 @@ final class AuthController {
         await auth.signOut()
         session = nil
         hasOnboarded = false
+        profile.isSignedInWithApple = false
+    }
+
+    /// Back to the sign-in screen, with the identity left intact.
+    ///
+    /// The way out of "use without signing in" for somebody who has changed
+    /// their mind. Deliberately not ``signOut()``: that throws away the
+    /// refresh token, and for an anonymous user the refresh token *is* the
+    /// account — dropping it here would silently strand every bide they made
+    /// while looking around. Tapping "use without signing in" again lands them
+    /// back on the same identity.
+    func returnToSignIn() {
+        session = nil
+        hasOnboarded = false
     }
 
     // MARK: - Plumbing
 
-    private func run(_ work: @escaping () async throws -> Void) async {
+    private func run(
+        describe: @escaping (APIError) -> String = { $0.errorDescription ?? "Something went wrong signing in." },
+        _ work: @escaping () async throws -> Void
+    ) async {
         isWorking = true
         errorMessage = nil
         defer { isWorking = false }
@@ -129,9 +165,32 @@ final class AuthController {
         do {
             try await work()
         } catch let error as APIError {
-            errorMessage = error.errorDescription
+            errorMessage = describe(error)
         } catch {
             errorMessage = "Something went wrong signing in."
+        }
+    }
+
+    /// A failure *during* sign-in reads differently from one after it.
+    /// ``APIError/notAuthenticated`` normally means "your session lapsed", and
+    /// its copy says so — "You're signed out. Sign in to keep sharing your
+    /// ETA" — which as a response to signing in is both baffling and a dead
+    /// end.
+    ///
+    /// Server messages come through verbatim, because the ones that reach this
+    /// path name their own fix: "Provider is not enabled" is a toggle in the
+    /// Supabase dashboard, "Unacceptable audience in id_token" is a bundle ID
+    /// missing from its Client IDs list, "Signups not allowed for this
+    /// instance" is anonymous sign-ins switched off. Every one of those is
+    /// unrecognisable as "try again", which is what they used to say.
+    private static func signInFailure(_ error: APIError, fallback: String) -> String {
+        switch error {
+        case .notAuthenticated:
+            fallback
+        case .serverError(_, let message?):
+            message
+        default:
+            error.errorDescription ?? fallback
         }
     }
 

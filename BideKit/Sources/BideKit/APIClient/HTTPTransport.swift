@@ -15,7 +15,32 @@ public struct URLSessionTransport: HTTPTransport {
         self.session = session
     }
 
+    /// Sends the request, replaying it once if the connection turned out to be
+    /// dead before anything was written to it.
+    ///
+    /// `URLSession` pools connections and keeps handing them back after the
+    /// far end has quietly closed one — Supabase sits behind a proxy that
+    /// reaps idle connections, so this shows up as `-1005 "The network
+    /// connection was lost"` on the *first* request after the app has been
+    /// sitting still, most visibly the token refresh on launch. The user was
+    /// never offline, so telling them to check their connection is simply
+    /// wrong; the fix is to let URLSession discard the dead connection and try
+    /// again on a fresh one.
+    ///
+    /// One replay, and only for that one error code. A genuine outage still
+    /// surfaces as ``APIError/transport(_:)`` on the first attempt, and every
+    /// write this transport carries is safe to repeat: the ids are generated
+    /// by the client, so a request that did land the first time collides
+    /// rather than duplicating.
     public func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await perform(request)
+        } catch let error as URLError where error.code == .networkConnectionLost {
+            return try await perform(request)
+        }
+    }
+
+    private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse("expected an HTTP response, got \(type(of: response))")
@@ -53,9 +78,10 @@ public struct BideSession: Equatable, Sendable {
     public let userID: UUID
     public let accessToken: String
     /// Whether this identity exists only on this device. An anonymous user is
-    /// a real `auth.uid()` with real rows, but nothing can recover it if the
-    /// app is deleted — which is what the settings screen warns about, and
-    /// what Sign in with Apple fixes.
+    /// a real `auth.uid()` with real rows, but it lives and dies with one
+    /// keychain entry: it survives deleting the app, and nothing recovers it
+    /// from another device or an erased one. That's what the settings screen
+    /// warns about, and what Sign in with Apple fixes.
     public let isAnonymous: Bool
 
     public init(userID: UUID, accessToken: String, isAnonymous: Bool = true) {

@@ -82,14 +82,23 @@ public enum BideFormat {
     /// one, and rather than showing a raw identifier.
     public static let anonymousName = "Someone"
 
-    public static func name(_ participant: Participant) -> String {
+    /// What to call the person reading the screen. Wins over their own display
+    /// name: a roster is read to find out where everyone *else* has got to, and
+    /// "You" is what makes your own row skimmable.
+    public static let selfName = "You"
+
+    /// - Parameter me: The local user's id, when the caller knows it. Anywhere
+    ///   the reader could be in the list — a roster, the Live Activity — pass
+    ///   it, or an anonymous user sees themselves as "Someone".
+    public static func name(_ participant: Participant, me: UUID? = nil) -> String {
+        if participant.userID == me { return selfName }
         let trimmed = participant.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (trimmed?.isEmpty == false ? trimmed : nil) ?? anonymousName
     }
 
     /// The single letter in the avatar circle.
-    public static func initial(_ participant: Participant) -> String {
-        String(name(participant).prefix(1)).uppercased()
+    public static func initial(_ participant: Participant, me: UUID? = nil) -> String {
+        String(name(participant, me: me).prefix(1)).uppercased()
     }
 
     // MARK: - Private

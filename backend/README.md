@@ -75,6 +75,20 @@ Two things are worth knowing before editing the policies:
 A bide is reachable only by someone who was sent its id in a tile URL and then
 joined. The URL is the capability.
 
+3. **`delete_me()` is `security definer` for the same reason, and safe for the
+   same reason.** GoTrue has no client-callable account deletion — the admin
+   endpoint needs the service_role key, which cannot ship in an app — so
+   deleting your own account has to be a function. `authenticated` has no delete
+   privilege on `auth.users` and must not be given one. The function takes its
+   subject from `auth.uid()` and has **no arguments**, so there is no value a
+   caller can pass that makes it touch a different row.
+
+   Everything follows through the existing cascades: `bides.created_by`,
+   `participants.user_id` and `devices.user_id` all reference
+   `auth.users (id) on delete cascade`. Note the reach — deleting an account
+   deletes the bides that account *created*, for everybody in them, which is
+   wider than leaving a bide.
+
 ## Realtime is off
 
 `config.toml` disables realtime, and that's deliberate — the Messages extension

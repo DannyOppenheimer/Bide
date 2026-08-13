@@ -30,11 +30,17 @@ public struct BidePlanForm: View {
         }
 
         /// The Messages compose sheet.
+        ///
+        /// Chips are grey here as well as in the app. They were white, which
+        /// made the same control look like two different ones depending on
+        /// which sheet you had opened — and a white chip sits a step away from
+        /// the white Send button below it, so the form read as having two
+        /// primary actions.
         public static let send = Style(
             prompt: "Where are we going?",
             actionTitle: "Send",
             showsArrivalStyle: true,
-            chipEmphasis: .solid
+            chipEmphasis: .subtle
         )
 
         /// The app's solo-bide card.
@@ -118,7 +124,10 @@ public struct BidePlanForm: View {
                 BideChip(emphasis: style.chipEmphasis) {
                     editingDate = true
                 } label: {
-                    Text(draft.scheduledFor.map { BideFormat.day($0) } ?? "ASAP")
+                    // No time set is the default and means "leave now", so the
+                    // chips say what that is rather than "ASAP", which named
+                    // the internal state instead of the plan.
+                    Text(draft.scheduledFor.map { BideFormat.day($0) } ?? "Today")
                 }
             }
 
@@ -127,7 +136,7 @@ public struct BidePlanForm: View {
                 BideChip(emphasis: style.chipEmphasis) {
                     editingTime = true
                 } label: {
-                    Text(draft.scheduledFor.map { BideFormat.time($0) } ?? "ASAP")
+                    Text(draft.scheduledFor.map { BideFormat.time($0) } ?? "Now")
                 }
             }
 
@@ -186,11 +195,30 @@ private struct SchedulePicker: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// Where the wheel starts when no time has been set yet, captured once so
+    /// it can't drift under the user's finger while they are looking at it.
+    ///
+    /// *Now*, not the next quarter hour. The chip they tapped said "Now", and a
+    /// picker that opens somewhere else has silently changed the plan before
+    /// they touched it.
+    @State private var openedAt = Date()
+
     private var selection: Binding<Date> {
         Binding(
-            get: { scheduledFor ?? BidePlanDraft.defaultTime() },
+            get: { scheduledFor ?? openedAt },
             set: { scheduledFor = $0 }
         )
+    }
+
+    /// Whether the plan is still "leave now".
+    ///
+    /// What the way-out button is offered against. Shown while the answer is
+    /// already now it reads as confirmation; left on screen after somebody has
+    /// picked 6pm tomorrow it reads as a *description* of the plan, and a wrong
+    /// one — which is exactly how it came across.
+    private var isEffectivelyNow: Bool {
+        guard let scheduledFor else { return true }
+        return Calendar.current.isDate(scheduledFor, equalTo: openedAt, toGranularity: .minute)
     }
 
     /// The two styles are different types, so this can't be a ternary.
@@ -214,12 +242,17 @@ private struct SchedulePicker: View {
                     .labelsHidden()
                     .tint(BideColor.primaryText)
 
-                Button("As soon as everyone can") {
-                    scheduledFor = nil
-                    dismiss()
+                // Only while the plan is still "now" — see `isEffectivelyNow`.
+                // Scrolling the wheel back to the current minute brings it
+                // back, so it is never a one-way door.
+                if isEffectivelyNow {
+                    Button("Leave now — as soon as everyone can") {
+                        scheduledFor = nil
+                        dismiss()
+                    }
+                    .font(BideFont.body)
+                    .foregroundStyle(BideColor.secondaryText)
                 }
-                .font(BideFont.body)
-                .foregroundStyle(BideColor.secondaryText)
 
                 Spacer(minLength: 0)
             }
@@ -231,8 +264,10 @@ private struct SchedulePicker: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        // Opening the picker at all means a time was wanted.
-                        if scheduledFor == nil { scheduledFor = BidePlanDraft.defaultTime() }
+                        // Opening the picker at all means a time was wanted —
+                        // and if they didn't move the wheel, the time they
+                        // wanted is the one it was showing.
+                        if scheduledFor == nil { scheduledFor = openedAt }
                         dismiss()
                     }
                     .tint(BideColor.primaryText)
@@ -246,7 +281,7 @@ private struct SchedulePicker: View {
 }
 
 #Preview {
-    @Previewable @State var draft = BidePlanDraft(scheduledFor: BidePlanDraft.defaultTime())
+    @Previewable @State var draft = BidePlanDraft()
 
     return BidePlanForm(draft: $draft, style: .send, search: PlaceSearchService()) {}
         .padding(BideMetrics.gutter)

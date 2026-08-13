@@ -13,24 +13,47 @@ public struct ActivityParticipant: Codable, Hashable, Identifiable, Sendable {
     public let mode: TravelMode
     /// "Waiting...", "45 minutes", "Arrived".
     public let line: String
+    /// When this person expects to arrive, if they're on their way.
+    ///
+    /// Carried *as a date* rather than only as the rendered ``line``, because a
+    /// string is right for one instant and the lock screen is looked at at all
+    /// the others. A pre-rendered "10 minutes" is frozen at whatever the app
+    /// last pushed, while the same roster in the app counts down every second —
+    /// which is how the two surfaces came to disagree about the same person by
+    /// a minute. With the date here, both render it live and cannot drift.
+    public let eta: Date?
     public let grade: DelayGrade?
 
-    public init(id: UUID, name: String, initial: String, mode: TravelMode, line: String, grade: DelayGrade?) {
+    public init(
+        id: UUID,
+        name: String,
+        initial: String,
+        mode: TravelMode,
+        line: String,
+        eta: Date? = nil,
+        grade: DelayGrade?
+    ) {
         self.id = id
         self.name = name
         self.initial = initial
         self.mode = mode
         self.line = line
+        self.eta = eta
         self.grade = grade
     }
 
-    public init(participant: Participant, now: Date = Date()) {
+    /// - Parameter me: The local user's id, so their own row on the lock
+    ///   screen reads "You" rather than whatever they called themselves.
+    public init(participant: Participant, me: UUID? = nil, now: Date = Date()) {
         self.init(
             id: participant.userID,
-            name: BideFormat.name(participant),
-            initial: BideFormat.initial(participant),
+            name: BideFormat.name(participant, me: me),
+            initial: BideFormat.initial(participant, me: me),
             mode: participant.mode,
             line: BideFormat.participantStatus(participant, now: now),
+            // Only while they're travelling. "Arrived" and "Not coming" are
+            // statements, not countdowns, and `line` already says them.
+            eta: participant.status == .accepted ? participant.etaTimestamp : nil,
             grade: participant.delayGrade
         )
     }

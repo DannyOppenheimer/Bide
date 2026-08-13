@@ -181,6 +181,29 @@ extension BideState {
         return !answered.isEmpty && answered.allSatisfy { $0.status == .arrived }
     }
 
+    /// How long a bide outlives the moment it was aiming for.
+    ///
+    /// ``isComplete`` is the tidy ending, and most bides never reach it: it
+    /// needs every single person to be marked `arrived`, which only happens if
+    /// their app was open and tracking when they got there. People put the
+    /// phone in a pocket instead. So without a second, duller ending, a bide is
+    /// forever — last Tuesday's dinner is still on the home screen, and worse,
+    /// it is still what `reconcileTracking` picks, so the app holds a location
+    /// subscription open for a meetup nobody is going to.
+    ///
+    /// Six hours, measured from the agreed time — or from creation for an asap
+    /// bide, which has no other clock. Long enough that a table booked for 7pm
+    /// is still live at midnight; short enough that nothing survives the night.
+    public static let lifetime: TimeInterval = 6 * 60 * 60
+
+    /// Whether this bide is over by the clock rather than by anyone saying so.
+    ///
+    /// A bide scheduled for next week is not expired — the interval is
+    /// negative — so this only ever retires the past.
+    public func isExpired(now: Date = Date()) -> Bool {
+        now.timeIntervalSince(scheduledFor ?? createdAt) > Self.lifetime
+    }
+
     /// The person with the longest journey still ahead of them. In an
     /// ``ArrivalStyle/together`` bide this is who everyone else waits on.
     public func furthestTraveller(now: Date = Date()) -> Participant? {

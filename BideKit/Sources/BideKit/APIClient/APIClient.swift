@@ -48,6 +48,15 @@ public protocol BideAPI: Sendable {
 
     /// Sets the name shown beside your avatar, across every bide you're in.
     func updateDisplayName(_ name: String) async throws(APIError)
+
+    /// Deletes this account and everything that cascades from it — every bide
+    /// you created, every roster you appeared in, your push tokens.
+    ///
+    /// Irreversible, and wider than ``leaveBide(bideID:)``: a bide you created
+    /// goes for everybody in it, not just for you. There is no argument, on
+    /// purpose — the server takes the subject from `auth.uid()`, so there is
+    /// nothing here that could name somebody else.
+    func deleteMe() async throws(APIError)
 }
 
 extension BideAPI {
@@ -289,6 +298,25 @@ public struct SupabaseAPIClient: BideAPI {
             session: session,
             queryItems: [URLQueryItem(name: "user_id", value: "eq.\(session.userID.uuidString)")],
             body: body,
+            prefer: "return=minimal"
+        )
+
+        _ = try await performExpectingSuccess(request)
+    }
+
+    public func deleteMe() async throws(APIError) {
+        let session = try await requireSession()
+
+        // A function rather than a DELETE on a table: the row that has to go is
+        // in `auth.users`, which no client role may touch. `delete_me` is
+        // `security definer` and takes its subject from auth.uid(), so the
+        // request carries no id and there is nothing in it to forge. Everything
+        // in `public` follows through the cascades — see the migration.
+        let request = try makeRequest(
+            method: "POST",
+            path: "/rest/v1/rpc/delete_me",
+            session: session,
+            body: Data("{}".utf8),
             prefer: "return=minimal"
         )
 

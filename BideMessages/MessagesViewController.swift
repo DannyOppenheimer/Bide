@@ -19,6 +19,9 @@ final class MessagesViewController: MSMessagesAppViewController {
 
     private let profile = BideProfileStore()
     private let answers = LocalBideStore(defaults: .bideShared)
+    /// Shared with the container app through the App Group, which is how a
+    /// sent tile reaches the app without Messages being left.
+    private let pending = PendingInviteStore()
 
     private lazy var model: MessagesModel = {
         // Foreground-only location: the tile shows "36 minutes from this
@@ -32,6 +35,7 @@ final class MessagesViewController: MSMessagesAppViewController {
         model.onAccept = { [weak self] tile, mode, leaveAt in self?.accept(tile, mode: mode, leaveAt: leaveAt) }
         model.onDecline = { [weak self] tile in self?.decline(tile) }
         model.onNeedsRoom = { [weak self] in self?.requestPresentationStyle(.expanded) }
+        model.onNeedsAccount = { [weak self] in self?.openApp() }
         return model
     }()
 
@@ -137,25 +141,44 @@ final class MessagesViewController: MSMessagesAppViewController {
 
     /// Puts a new tile in the input field. An extension may stage a message;
     /// only the person can send it.
+    ///
+    /// **Stays in Messages.** This used to hand off to the container app on
+    /// every send, which threw the user out of the thread they were writing in
+    /// — to look at a screen that, nine times out of ten, had nothing to say to
+    /// them. The hand-off was there for the clash check, and a clash is not
+    /// something a sent tile causes: sending is asking, and nobody has answered
+    /// yet. Recording the invite in the App Group is enough, and the app runs
+    /// the check when it claims one — the moment it becomes a real commitment.
     private func stage(_ draft: BidePlanDraft) {
         guard
             let conversation = activeConversation,
             let invite = draft.invite()
         else { return }
 
-        let tile = BideTileMessage(invite: invite, senderName: profile.displayName)
-        // The creator's own answer, so their transcript shows the sent state
-        // rather than an invitation addressed to themselves.
-        answers.record(LocalAnswer(status: .accepted, mode: draft.mode), for: invite.bideID)
+        // The same rule the compose screen enforces, kept here as well because
+        // this is the line that actually writes something. Sending puts a bide
+        // in someone else's hands and has to outlive this install.
+        guard profile.isSignedInWithApple else {
+            openApp()
+            return
+        }
 
+        let tile = BideTileMessage(invite: invite, senderName: profile.displayName)
+
+        // Deliberately no local answer for the sender. Sending is asking, not
+        // going: until somebody replies there is nothing to be on the way to,
+        // so their own bubble reads "Waiting for replies" — which is both what
+        // the transcript should say and what the app is actually doing.
         insert(tile, summary: "Meet at \(invite.destinationName)?", into: conversation) { [weak self] in
             self?.requestPresentationStyle(.compact)
         }
 
-        // The bide itself is created server-side by the container app, which
-        // holds the identity every row-level security policy is written
-        // against. The extension deliberately owns no account of its own.
-        open(tile.appURL(), action: .create, mode: draft.mode)
+        // The container app picks this up on its next refresh and turns it into
+        // a session once somebody accepts. It holds the identity every
+        // row-level security policy is written against; the extension
+        // deliberately owns no account of its own and writes nothing to the
+        // server.
+        pending.add(PendingInvite(invite: invite, mode: draft.mode))
     }
 
     private func accept(_ tile: BideTileMessage, mode: TravelMode, leaveAt: Date?) {
@@ -169,6 +192,14 @@ final class MessagesViewController: MSMessagesAppViewController {
         )
         insert(answered, summary: "On the way to \(tile.invite.destinationName)", into: conversation)
         open(answered.appURL(), action: .accept, mode: mode)
+    }
+
+    /// Opens the container app so the person can sign in. Nothing is handed
+    /// over — this is a trip to a screen, not a tile — so the URL carries no
+    /// invite and the app treats it as a plain launch.
+    private func openApp() {
+        guard let url = URL(string: "\(BideInvite.appScheme)://") else { return }
+        extensionContext?.open(url)
     }
 
     private func decline(_ tile: BideTileMessage) {
@@ -239,9 +270,10 @@ final class MessagesViewController: MSMessagesAppViewController {
         return renderer.uiImage
     }
 
-    /// What the container app should do once it opens.
+    /// What the container app should do once it opens. Only accepting opens it
+    /// now — sending a tile stays in Messages and leaves the invite in the App
+    /// Group for the app to find.
     private enum HandOff: String {
-        case create
         case accept
     }
 

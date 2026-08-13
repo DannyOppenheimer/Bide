@@ -43,8 +43,11 @@ final class BideStore {
     private let activities: LiveActivityController
     private let profile: BideProfileStore
     private let answers: LocalBideStore
+    private let pending: PendingInviteStore
 
-    private var userID: UUID?
+    /// Who the local user is, so a roster can tell their row from everyone
+    /// else's. Nil until ``start(userID:)``.
+    private(set) var userID: UUID?
     private var refreshTask: Task<Void, Never>?
     /// The ETA we first recorded for this bide, which every later one is
     /// graded against for the green/yellow/red colouring.
@@ -58,13 +61,15 @@ final class BideStore {
         eta: any ETAEngine,
         activities: LiveActivityController? = nil,
         profile: BideProfileStore = BideProfileStore(),
-        answers: LocalBideStore = LocalBideStore(defaults: .bideShared)
+        answers: LocalBideStore = LocalBideStore(defaults: .bideShared),
+        pending: PendingInviteStore = PendingInviteStore()
     ) {
         self.api = api
         self.eta = eta
         self.activities = activities ?? LiveActivityController()
         self.profile = profile
         self.answers = answers
+        self.pending = pending
     }
 
     // MARK: - Session
@@ -94,7 +99,14 @@ final class BideStore {
         isLoading = bides.isEmpty
 
         do {
-            bides = try await api.fetchMyBides().filter { !$0.isComplete }
+            // Two endings, and a bide needs only one of them. `isComplete` is
+            // the tidy one and most bides never reach it, because it takes
+            // everybody's app being open at the far end; `isExpired` is the
+            // clock running out, which is what actually retires them. Filtered
+            // here rather than in the query so the rule is one line of Swift
+            // that the tests can read.
+            let now = Date()
+            bides = try await api.fetchMyBides().filter { !$0.isComplete && !$0.isExpired(now: now) }
             errorMessage = nil
             reconcileTracking()
         } catch let error as APIError {
@@ -103,6 +115,7 @@ final class BideStore {
             errorMessage = "Couldn't reach Bide."
         }
 
+        await claimPendingInvites()
         isLoading = false
     }
 
@@ -122,10 +135,11 @@ final class BideStore {
 
     // MARK: - Writing
 
-    /// Creates a bide from a draft — the app's own solo composer, or a tile
-    /// the extension just staged.
-    func create(_ draft: BidePlanDraft, isSolo: Bool, id: UUID? = nil) async {
-        guard let invite = draft.invite(id: id ?? UUID()) else { return }
+    /// Creates a bide from a draft — the app's own solo composer, or the
+    /// calendar. A bide sent to other people goes through ``stage(_:mode:)``
+    /// instead, and isn't created until somebody answers it.
+    func create(_ draft: BidePlanDraft, isSolo: Bool) async {
+        guard let invite = draft.invite() else { return }
         await withConflictCheck(for: invite, mode: draft.mode) { [weak self] in
             guard let self else { return }
             await perform {
@@ -203,20 +217,108 @@ final class BideStore {
 
         switch items.first(where: { $0.name == "action" })?.value {
         case "create":
-            // The extension staged the tile; this side makes it real.
-            let draft = BidePlanDraft(
-                destination: tile.invite.destination,
-                mode: mode,
-                scheduledFor: tile.invite.scheduledFor,
-                arrivalStyle: tile.invite.arrivalStyle
-            )
-            await create(draft, isSolo: false, id: tile.invite.bideID)
+            // Nothing opens the app this way any more: the extension records
+            // the invite in the App Group and stays in the thread. Kept so a
+            // URL from an older build — or one arriving some other way — still
+            // lands somewhere sensible instead of being mistaken for an
+            // acceptance, which would create the bide on the spot.
+            //
+            // Sending a tile puts a bide in someone else's thread and has to
+            // outlive this install, so it needs an account behind it. The
+            // extension checks the same flag; this is the check that holds if
+            // the URL arrives any other way.
+            guard profile.isSignedInWithApple else {
+                errorMessage = "Sign in with Apple to send a Bide to someone."
+                return
+            }
+            pending.add(PendingInvite(invite: tile.invite, mode: mode))
+            await claimPendingInvites()
         default:
             await accept(tile, mode: mode)
         }
     }
 
+    // MARK: - Invitations waiting on an answer
+
+    /// Turns sent tiles into real sessions, once somebody has accepted one.
+    ///
+    /// `join_bide` is the test as much as the action. The bide row does not
+    /// exist until a recipient accepts — their app creates it on the way in —
+    /// so a join that comes back ``APIError/notFound`` means nobody has
+    /// answered yet, and one that succeeds means somebody has and the sender
+    /// belongs in it now.
+    private func claimPendingInvites() async {
+        guard userID != nil, !pending.isEmpty else { return }
+
+        for staged in pending.all() {
+            do {
+                let state = try await api.joinBide(
+                    bideID: staged.invite.bideID,
+                    mode: staged.mode,
+                    status: .accepted
+                )
+                pending.remove(staged.id)
+                merge(state)
+                reconcileTracking()
+                // Best effort, and after the fact: a name that doesn't land
+                // is a blank avatar, not a reason to lose the session.
+                try? await nameMyselfIfNeeded()
+                warnIfClashing(with: state)
+            } catch APIError.notFound {
+                // Still unanswered. Ask again on the next refresh.
+            } catch {
+                // Offline, or the server is unwell. Leave every remaining
+                // invite staged and stop asking until the next refresh — the
+                // rest would fail the same way.
+                return
+            }
+        }
+    }
+
     // MARK: - Conflicts
+
+    /// A tile the user sent has just been answered, so it is a commitment now
+    /// rather than a question — and this is the first moment it can be weighed
+    /// against the rest of their day, because until somebody accepted there was
+    /// no bide to weigh.
+    ///
+    /// This check used to happen at send time, in the container app, which is
+    /// why sending a tile threw the user out of Messages every time — to be
+    /// asked, nine times in ten, nothing at all. Worse, it asked them to give
+    /// up a real session for a hypothetical one that might never be answered.
+    ///
+    /// "Continue" drops the bides it clashes with, as before. "Cancel" now
+    /// keeps both, which is the honest option here and wasn't at send time:
+    /// somebody has already accepted this one, so quietly walking out of it
+    /// would strand them.
+    private func warnIfClashing(with state: BideState) {
+        guard let userID, let proposed = state.travelWindow(for: userID) else { return }
+
+        let existing = bides
+            .filter { $0.bideID != state.bideID }
+            .compactMap { other -> ScheduleConflict.Candidate? in
+                guard let window = other.travelWindow(for: userID) else { return nil }
+                return ScheduleConflict.Candidate(
+                    id: other.bideID,
+                    destinationName: other.destinationName,
+                    window: window
+                )
+            }
+
+        let clashes = ScheduleConflict.conflicts(
+            with: proposed,
+            proposedID: state.bideID,
+            among: existing
+        )
+        guard let message = ScheduleConflict.warning(for: clashes) else { return }
+
+        conflict = ConflictPrompt(message: message, losing: clashes.map(\.id)) { [weak self] in
+            guard let self else { return }
+            for bideID in clashes.map(\.id) {
+                await leave(bideID)
+            }
+        }
+    }
 
     /// The design's rule: a new commitment that overlaps an existing one wins,
     /// and you're told before it does.
@@ -288,7 +390,7 @@ final class BideStore {
 
         // Already on it: just refresh what's on the lock screen.
         guard candidate.bideID != trackedBideID else {
-            activities.update(state: candidate, plan: plan(for: candidate), now: Date())
+            activities.update(state: candidate, plan: plan(for: candidate), me: userID, now: Date())
             return
         }
 
@@ -303,7 +405,7 @@ final class BideStore {
                 await self?.publish(result, for: candidate.bideID, mode: mode)
             }
         }
-        activities.start(state: candidate, plan: plan(for: candidate))
+        activities.start(state: candidate, plan: plan(for: candidate), me: userID)
     }
 
     /// Sends one anchored reading to the server — an arrival timestamp and

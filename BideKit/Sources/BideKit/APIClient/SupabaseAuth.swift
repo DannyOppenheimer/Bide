@@ -92,8 +92,12 @@ public final class InMemoryTokenStore: AuthTokenStore, @unchecked Sendable {
 /// security policy is written against:
 ///
 /// - **Anonymous**, the default. Nobody is asked to make an account before
-///   they've seen the app work. The identity lives in the keychain and
-///   survives relaunches, but not a reinstall.
+///   they've seen the app work. The identity lives in the keychain, which
+///   outlives not just relaunches but *deleting the app* — iOS does not clear
+///   keychain items on uninstall. So a reinstall resumes the same user and the
+///   same bides come back down from the server, which is the answer to "why is
+///   last week's meetup still here after I wiped the build". `signOut()` is
+///   the only thing that forgets it.
 /// - **Sign in with Apple**, via ``signInWithApple(idToken:nonce:)``, which is
 ///   the same identity on every device the user owns.
 ///
@@ -179,7 +183,8 @@ public actor BideAuthProvider: BideSessionProvider {
         return try await authenticate(
             path: "/auth/v1/token",
             query: [URLQueryItem(name: "grant_type", value: "id_token")],
-            body: body
+            body: body,
+            failure: .explained
         )
     }
 
@@ -197,7 +202,12 @@ public actor BideAuthProvider: BideSessionProvider {
     // MARK: Requests
 
     private func signInAnonymously() async throws(APIError) -> BideSession {
-        try await authenticate(path: "/auth/v1/signup", query: [], body: Data("{}".utf8))
+        try await authenticate(
+            path: "/auth/v1/signup",
+            query: [],
+            body: Data("{}".utf8),
+            failure: .explained
+        )
     }
 
     private func exchange(refreshToken: String) async throws(APIError) -> BideSession {
@@ -211,14 +221,33 @@ public actor BideAuthProvider: BideSessionProvider {
         return try await authenticate(
             path: "/auth/v1/token",
             query: [URLQueryItem(name: "grant_type", value: "refresh_token")],
-            body: body
+            body: body,
+            failure: .identityLost
         )
+    }
+
+    /// What a 400/401/403 from `/auth/v1` *means*, which depends entirely on
+    /// what was sent.
+    private enum AuthFailure {
+        /// A refresh token the server no longer recognises. There is nothing
+        /// to explain and nothing the user can do: the identity is gone, and
+        /// ``currentSession()`` catches ``APIError/notAuthenticated`` to mint a
+        /// new one.
+        case identityLost
+        /// A token the server was just handed and refused — and it says why:
+        /// "Provider is not enabled", "Unacceptable audience in id_token".
+        /// Those name their own fix, so they must survive the mapping. Folding
+        /// them into `notAuthenticated` was the difference between a sign-in
+        /// failure that tells you the Apple provider is switched off and one
+        /// that says "try again" forever.
+        case explained
     }
 
     private func authenticate(
         path: String,
         query: [URLQueryItem],
-        body: Data
+        body: Data,
+        failure: AuthFailure
     ) async throws(APIError) -> BideSession {
         guard var components = URLComponents(url: configuration.projectURL, resolvingAgainstBaseURL: false) else {
             throw APIError.invalidConfiguration("project URL is not a valid URL: \(configuration.projectURL)")
@@ -251,7 +280,7 @@ public actor BideAuthProvider: BideSessionProvider {
         }
 
         guard (200..<300).contains(response.statusCode) else {
-            throw Self.mapAuthFailure(status: response.statusCode, data: data)
+            throw Self.mapAuthFailure(status: response.statusCode, data: data, failure: failure)
         }
 
         let token: TokenResponse
@@ -279,14 +308,18 @@ public actor BideAuthProvider: BideSessionProvider {
         return session
     }
 
-    private static func mapAuthFailure(status: Int, data: Data) -> APIError {
-        let failure = try? JSONDecoder().decode(GoTrueError.self, from: data)
-        let message = failure?.errorDescription ?? failure?.msg ?? failure?.message
+    private static func mapAuthFailure(status: Int, data: Data, failure: AuthFailure) -> APIError {
+        let body = try? JSONDecoder().decode(GoTrueError.self, from: data)
+        let message = body?.errorDescription ?? body?.msg ?? body?.message
 
         switch status {
         case 400, 401, 403:
-            // Includes a refresh token the server no longer recognises.
-            return .notAuthenticated
+            // A refresh token the server no longer recognises is the only one
+            // of these that means "signed out". The rest are the server
+            // explaining what it wants, and the explanation is the whole value
+            // of the response.
+            guard case .explained = failure, let message else { return .notAuthenticated }
+            return .serverError(status: status, message: message)
         case 422:
             // The most likely one during setup: anonymous sign-ins are turned
             // off in the project's auth settings.

@@ -15,6 +15,10 @@ final class MessagesModel {
     enum Screen: Equatable {
         /// Nothing selected: offer to start one.
         case compose
+        /// Nothing selected, and no account to send one with. Sending a tile
+        /// commits this person to something another person is relying on, and
+        /// an identity that dies with the app can't carry that.
+        case signInRequired
         /// Someone else's tile, unanswered.
         case respond(BideTileMessage)
         /// A tile there's nothing to do about here — your own, or one you've
@@ -23,7 +27,7 @@ final class MessagesModel {
     }
 
     var screen: Screen = .compose
-    var draft = BidePlanDraft(scheduledFor: BidePlanDraft.defaultTime())
+    var draft = BidePlanDraft()
     /// The recipient's own travel mode on the respond screen, which is a
     /// different choice from the sender's in ``draft``.
     var replyMode: TravelMode = .walking
@@ -37,6 +41,7 @@ final class MessagesModel {
 
     @ObservationIgnored private let eta: any ETAEngine
     @ObservationIgnored private let store: LocalBideStore
+    @ObservationIgnored private let profile: BideProfileStore
     @ObservationIgnored private var previewTask: Task<Void, Never>?
 
     /// Insert a tile into the conversation. The user still taps send — an
@@ -48,10 +53,17 @@ final class MessagesModel {
     @ObservationIgnored var onDecline: ((BideTileMessage) -> Void)?
     /// Ask Messages for the taller presentation, which the forms need.
     @ObservationIgnored var onNeedsRoom: (() -> Void)?
+    /// Open the container app, which is the only place an account can be made.
+    @ObservationIgnored var onNeedsAccount: (() -> Void)?
 
-    init(eta: any ETAEngine, store: LocalBideStore = LocalBideStore()) {
+    init(
+        eta: any ETAEngine,
+        store: LocalBideStore = LocalBideStore(),
+        profile: BideProfileStore = BideProfileStore()
+    ) {
         self.eta = eta
         self.store = store
+        self.profile = profile
     }
 
     // MARK: - Screen
@@ -63,7 +75,10 @@ final class MessagesModel {
         previewFailed = false
 
         guard let tile else {
-            screen = .compose
+            // Read every time rather than cached: the extension stays alive
+            // across the trip to the app and back, so the answer changes
+            // under it the moment somebody signs in.
+            screen = profile.isSignedInWithApple ? .compose : .signInRequired
             return
         }
 
@@ -106,6 +121,12 @@ final class MessagesModel {
 
     func compose() {
         guard draft.isComplete else { return }
+        // The compose form isn't offered without an account, so this is the
+        // belt to that screen's braces rather than a path anyone takes.
+        guard profile.isSignedInWithApple else {
+            onNeedsAccount?()
+            return
+        }
         onCompose?(draft)
     }
 

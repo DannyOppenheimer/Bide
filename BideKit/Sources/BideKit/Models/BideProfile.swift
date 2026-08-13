@@ -33,6 +33,7 @@ public struct BideProfileStore: @unchecked Sendable {
     /// stands on.
     private let defaults: UserDefaults
     private static let displayNameKey = "bide.profile.displayName"
+    private static let signedInKey = "bide.profile.signedInWithApple"
 
     public init(defaults: UserDefaults = .bideShared) {
         self.defaults = defaults
@@ -54,5 +55,21 @@ public struct BideProfileStore: @unchecked Sendable {
                 defaults.removeObject(forKey: Self.displayNameKey)
             }
         }
+    }
+
+    /// Whether this person has a real account rather than a device-local one.
+    ///
+    /// Written by the container app, which owns the identity, and read by the
+    /// Messages extension, which has none of its own. Sending a tile puts a
+    /// bide in someone else's hands and has to survive a reinstall, so it is
+    /// the one thing an anonymous identity may not do — the extension checks
+    /// this before offering the compose form.
+    ///
+    /// Defaults to false, which is the safe answer: a missing App Group, or a
+    /// launch before the app has ever run, reads as "not signed in" and offers
+    /// the way in rather than a form that would fail later.
+    public var isSignedInWithApple: Bool {
+        get { defaults.bool(forKey: Self.signedInKey) }
+        nonmutating set { defaults.set(newValue, forKey: Self.signedInKey) }
     }
 }

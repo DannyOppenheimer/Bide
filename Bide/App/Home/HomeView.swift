@@ -9,7 +9,7 @@ struct HomeView: View {
     let store: BideStore
     let auth: AuthController
 
-    @State private var draft = BidePlanDraft(scheduledFor: BidePlanDraft.defaultTime())
+    @State private var draft = BidePlanDraft()
     @State private var search = PlaceSearchService()
     @State private var showingSettings = false
     @State private var isSaving = false
@@ -28,7 +28,9 @@ struct HomeView: View {
                         ForEach(store.bides) { state in
                             BideSessionCard(
                                 headline: store.headline(for: state, now: now),
+                                destination: state.destinationName,
                                 participants: state.participants.filter { $0.status != .declined },
+                                me: store.userID,
                                 isLive: state.bideID == store.trackedBideID,
                                 now: now
                             )
@@ -92,6 +94,22 @@ struct HomeView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
+            // The way back for somebody who chose "use without signing in" and
+            // has changed their mind — without it, that choice is permanent
+            // short of deleting the app. Signed-in users have no landing page
+            // to go back to, so they don't get one.
+            if !auth.isSignedInWithApple {
+                Button {
+                    store.stop()
+                    auth.returnToSignIn()
+                } label: {
+                    Image(systemName: "chevron.backward")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(BideColor.primaryText)
+                }
+                .accessibilityLabel("Back to sign in")
+            }
+
             Text("Bide")
                 .font(BideFont.screenTitle)
                 .foregroundStyle(BideColor.primaryText)
@@ -150,7 +168,7 @@ struct HomeView: View {
             await store.create(draft, isSolo: true)
             isSaving = false
             if store.errorMessage == nil {
-                draft = BidePlanDraft(scheduledFor: BidePlanDraft.defaultTime())
+                draft = BidePlanDraft()
                 search.clear()
             }
         }

@@ -9,7 +9,13 @@ import BideKit
 public struct BideSessionCard: View {
 
     private let headline: String
+    /// Where the bide is going. The headline is about *time* — "Leave in 10
+    /// minutes" — and on its own it leaves the reader to remember what for, so
+    /// the place gets a line of its own rather than being implied.
+    private let destination: String?
     private let participants: [Participant]
+    /// The local user's id, so their own place in the roster reads "You".
+    private let me: UUID?
     private let isLive: Bool
     private let showsBadge: Bool
     private let now: Date
@@ -18,24 +24,36 @@ public struct BideSessionCard: View {
 
     public init(
         headline: String,
+        destination: String? = nil,
         participants: [Participant],
+        me: UUID? = nil,
         isLive: Bool = false,
         showsBadge: Bool = true,
         now: Date = Date(),
         onTap: (() -> Void)? = nil
     ) {
         self.headline = headline
+        self.destination = destination
         self.participants = participants
+        self.me = me
         self.isLive = isLive
         self.showsBadge = showsBadge
         self.now = now
         self.onTap = onTap
     }
 
-    public init(state: BideState, leaveAt: Date?, now: Date = Date(), onTap: (() -> Void)? = nil) {
+    public init(
+        state: BideState,
+        me: UUID? = nil,
+        leaveAt: Date?,
+        now: Date = Date(),
+        onTap: (() -> Void)? = nil
+    ) {
         self.init(
             headline: Self.headline(for: state, leaveAt: leaveAt, now: now),
+            destination: state.destinationName,
             participants: state.participants.filter { $0.status != .declined },
+            me: me,
             isLive: state.travellers.contains { $0.etaTimestamp != nil },
             now: now,
             onTap: onTap
@@ -58,6 +76,12 @@ public struct BideSessionCard: View {
                         .font(BideFont.cardTitle)
                         .foregroundStyle(BideColor.primaryText)
                         .multilineTextAlignment(.center)
+                    if let destination, !destination.isEmpty {
+                        Text(destination)
+                            .font(BideFont.caption)
+                            .foregroundStyle(BideColor.secondaryText)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 .frame(maxWidth: .infinity)
 
@@ -85,18 +109,19 @@ public struct BideSessionCard: View {
             spacing: 14
         ) {
             ForEach(participants) { participant in
-                ParticipantTile(participant: participant, now: now)
+                ParticipantTile(participant: participant, me: me, now: now)
             }
         }
     }
 
     /// "Leave in 10 minutes" / "Leave tomorrow at 3:00 PM" / "Waiting for
-    /// everyone to answer".
+    /// everyone to answer". Never the destination — that has its own line now,
+    /// so naming it here would only say it twice.
     static func headline(for state: BideState, leaveAt: Date?, now: Date) -> String {
         if state.isComplete { return "Everyone's here" }
         if let leaveAt { return BideFormat.leavePhrase(at: leaveAt, now: now) }
         if state.isAwaitingAnswers { return "Waiting for everyone to answer" }
-        return "Heading to \(state.destinationName)"
+        return "Nobody has set off yet"
     }
 }
 
@@ -115,9 +140,15 @@ public struct BideSessionCard: View {
     ]
 
     return VStack(spacing: 16) {
-        BideSessionCard(headline: "Leave in 10 minutes", participants: participants, isLive: true)
+        BideSessionCard(
+            headline: "Leave in 10 minutes",
+            destination: "Nats Park",
+            participants: participants,
+            isLive: true
+        )
         BideSessionCard(
             headline: "Leave tomorrow at 3:00 PM",
+            destination: "Union Market",
             participants: Array(participants.prefix(2)),
             isLive: false
         )

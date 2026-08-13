@@ -54,7 +54,19 @@ struct RootView: View {
                 SignInView(auth: auth)
             }
         }
-        .task { await auth.restore() }
+        .task {
+            // Temporary, and the only call site — delete this block with the
+            // file. See design/dev-build-reset.md. It runs before `restore()`
+            // on purpose: it needs the stored token to authenticate the delete,
+            // and it has to finish before anything decides which screen to
+            // show, or a new build flashes the home screen on its way to being
+            // signed out.
+            #if DEBUG
+            await DevBuildReset.runIfNeeded(auth: auth)
+            #endif
+
+            await auth.restore()
+        }
         .onOpenURL { url in
             // Accepting a tile means "start counting down my ETA", which needs
             // location, MKDirections, and this app's identity — none of which

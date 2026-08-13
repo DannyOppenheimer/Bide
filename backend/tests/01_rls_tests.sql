@@ -337,5 +337,72 @@ begin
 end
 $$;
 
+-- ---------------------------------------------------------------------------
+-- delete_me(). Last, because it destroys the rows everything above asserts on.
+-- ---------------------------------------------------------------------------
+set session role postgres;
+
+insert into auth.users (id, email) values
+  ('44444444-4444-4444-4444-444444444444', 'dave@example.com');
+
+do $$
+declare
+  v_denied boolean := false;
+begin
+  -- Dave makes a bide, Bob joins it, Dave registers a device.
+  perform pg_temp.become('44444444-4444-4444-4444-444444444444');
+  perform public.create_bide(
+    'dddddddd-0000-0000-0000-000000000001', 'Union Market', 38.908, -76.997,
+    null, 'on_time', false, now(), 'walking'
+  );
+  insert into public.devices (user_id, apns_token)
+  values ('44444444-4444-4444-4444-444444444444', 'apns-dave-phone');
+
+  perform pg_temp.become('22222222-2222-2222-2222-222222222222');
+  perform public.join_bide('dddddddd-0000-0000-0000-000000000001', 'driving', 'accepted');
+
+  -- Dave deletes himself. There is no argument to this function, so there is
+  -- nothing a caller can pass to make it delete somebody else — which is what
+  -- the survivors below are really asserting.
+  perform pg_temp.become('44444444-4444-4444-4444-444444444444');
+  perform public.delete_me();
+
+  set session role postgres;
+
+  perform pg_temp.check('delete_me removes the account',
+    not exists (select 1 from auth.users where id = '44444444-4444-4444-4444-444444444444'));
+  perform pg_temp.check('delete_me cascades to the bides they created',
+    not exists (select 1 from public.bides where id = 'dddddddd-0000-0000-0000-000000000001'));
+  perform pg_temp.check('delete_me cascades to every roster they appeared in',
+    not exists (select 1 from public.participants
+                 where user_id = '44444444-4444-4444-4444-444444444444'));
+  perform pg_temp.check('delete_me cascades to their devices',
+    not exists (select 1 from public.devices
+                 where user_id = '44444444-4444-4444-4444-444444444444'));
+  -- Bob's row went with the bide, not with Bob: the bide was Dave's.
+  perform pg_temp.check('a deleted creator takes their bide''s roster with it',
+    not exists (select 1 from public.participants
+                 where bide_id = 'dddddddd-0000-0000-0000-000000000001'));
+  -- But only the caller is deleted. Bob was in that bide and Alice was not in
+  -- it at all; both are still here.
+  perform pg_temp.check('a participant of the deleted bide survives',
+    exists (select 1 from auth.users where id = '22222222-2222-2222-2222-222222222222'));
+  perform pg_temp.check('everyone else survives',
+    exists (select 1 from auth.users where id = '11111111-1111-1111-1111-111111111111'));
+  perform pg_temp.check('other people''s bides are untouched',
+    exists (select 1 from public.bides where created_by = '11111111-1111-1111-1111-111111111111'));
+
+  -- And nobody who isn't signed in can reach it at all.
+  perform set_config('request.jwt.claims', null, false);
+  set role anon;
+  begin
+    perform public.delete_me();
+  exception when insufficient_privilege then
+    v_denied := true;
+  end;
+  perform pg_temp.check('anon cannot execute delete_me', v_denied);
+end
+$$;
+
 set session role postgres;
 select 'ALL RLS TESTS PASSED' as result;

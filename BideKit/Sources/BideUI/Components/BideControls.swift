@@ -165,6 +165,8 @@ public struct ParticipantTile: View {
     private let initial: String
     private let mode: TravelMode
     private let status: String
+    /// When they arrive, if they're on their way — see ``etaLine``.
+    private let etaTimestamp: Date?
     private let grade: DelayGrade?
     private let avatarSize: CGFloat
 
@@ -173,6 +175,7 @@ public struct ParticipantTile: View {
         initial: String,
         mode: TravelMode,
         status: String,
+        etaTimestamp: Date? = nil,
         grade: DelayGrade? = nil,
         avatarSize: CGFloat = BideMetrics.avatarSize
     ) {
@@ -180,16 +183,24 @@ public struct ParticipantTile: View {
         self.initial = initial
         self.mode = mode
         self.status = status
+        self.etaTimestamp = etaTimestamp
         self.grade = grade
         self.avatarSize = avatarSize
     }
 
-    public init(participant: Participant, now: Date = Date(), avatarSize: CGFloat = BideMetrics.avatarSize) {
+    /// - Parameter me: The local user's id, so their own tile reads "You".
+    public init(
+        participant: Participant,
+        me: UUID? = nil,
+        now: Date = Date(),
+        avatarSize: CGFloat = BideMetrics.avatarSize
+    ) {
         self.init(
-            name: BideFormat.name(participant),
-            initial: BideFormat.initial(participant),
+            name: BideFormat.name(participant, me: me),
+            initial: BideFormat.initial(participant, me: me),
             mode: participant.mode,
             status: BideFormat.participantStatus(participant, now: now),
+            etaTimestamp: participant.status == .accepted ? participant.etaTimestamp : nil,
             grade: participant.delayGrade,
             avatarSize: avatarSize
         )
@@ -202,6 +213,7 @@ public struct ParticipantTile: View {
             initial: participant.initial,
             mode: participant.mode,
             status: participant.line,
+            etaTimestamp: participant.eta,
             grade: participant.grade,
             avatarSize: avatarSize
         )
@@ -213,13 +225,35 @@ public struct ParticipantTile: View {
             Text(name)
                 .font(BideFont.personName)
                 .foregroundStyle(BideColor.primaryText)
-            Text(status)
+            etaLine
                 .font(BideFont.caption)
                 .foregroundStyle(grade.map(BideColor.delay) ?? BideColor.secondaryText)
         }
         .lineLimit(1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(name), \(status)")
+    }
+
+    /// The line under the name, live wherever it can be.
+    ///
+    /// The app redraws this every second off a ticking clock; the Live Activity
+    /// is redrawn only when the app pushes it something. Rendering a *date*
+    /// rather than a string it was handed earlier is what lets the system keep
+    /// the lock screen current on its own — and, because both surfaces go
+    /// through here, is what stops them disagreeing about the same person by a
+    /// minute, which is what they used to do.
+    ///
+    /// Only for an arrival still ahead. Behind it, the relative style counts
+    /// *upwards*, which would turn a missed ETA into a stopwatch; `status` has
+    /// the words for that case and every other one — "Waiting…", "Arrived",
+    /// "Not coming".
+    @ViewBuilder
+    private var etaLine: some View {
+        if let etaTimestamp, etaTimestamp.timeIntervalSinceNow > 0 {
+            Text(etaTimestamp, style: .relative)
+        } else {
+            Text(status)
+        }
     }
 }
 

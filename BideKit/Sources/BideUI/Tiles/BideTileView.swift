@@ -9,44 +9,58 @@ import BideKit
 /// reads as a different message rather than the same one.
 public struct BideTileView: View {
 
-    /// What sits on the left: the vertical wordmark, or the travel mode once
-    /// there's a journey to describe.
-    public enum Glyph: Equatable {
-        case mark
-        case mode(TravelMode)
-    }
-
-    private let glyph: Glyph
     private let title: String
     private let subtitle: String?
+    /// The travel mode, once there is a journey to describe. Sits beside the
+    /// countdown rather than in a column of its own — the mark has the top of
+    /// the tile now, and a lone icon out to the left of centred text only made
+    /// the tile look lopsided.
+    private let mode: TravelMode?
     /// A live countdown, when the tile has one — rendered with the system's
     /// self-updating relative text so it stays honest in the transcript,
     /// where nothing else is running.
     private let countdownTo: Date?
 
-    public init(glyph: Glyph = .mark, title: String, subtitle: String? = nil, countdownTo: Date? = nil) {
-        self.glyph = glyph
+    public init(
+        title: String,
+        subtitle: String? = nil,
+        mode: TravelMode? = nil,
+        countdownTo: Date? = nil
+    ) {
         self.title = title
         self.subtitle = subtitle
+        self.mode = mode
         self.countdownTo = countdownTo
     }
 
     public var body: some View {
-        HStack(spacing: 14) {
-            leading
-                .frame(width: 26, alignment: .leading)
+        VStack(spacing: 10) {
+            // The mark, horizontal, on every tile — sent, received, answered.
+            // It used to be the vertical form down the left-hand side, which
+            // existed only as the collapsed half of a morph between the two
+            // forms. With that animation gone it was just a second logo, and
+            // the worse one.
+            BideMark(.horizontal, dotDiameter: 6)
 
             VStack(spacing: 2) {
-                Group {
-                    if let countdownTo {
-                        // "Leave in 5 minutes", kept current by the system.
-                        Text("Leave \(Text(countdownTo, style: .relative))")
-                    } else {
-                        Text(title)
+                HStack(spacing: 6) {
+                    if let mode {
+                        Image(systemName: mode.symbolName)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(BideColor.primaryText)
                     }
+
+                    Group {
+                        if let countdownTo {
+                            // "Leave in 5 minutes", kept current by the system.
+                            Text("Leave \(Text(countdownTo, style: .relative))")
+                        } else {
+                            Text(title)
+                        }
+                    }
+                    .font(BideFont.cardTitle)
+                    .foregroundStyle(BideColor.primaryText)
                 }
-                .font(BideFont.cardTitle)
-                .foregroundStyle(BideColor.primaryText)
 
                 if let subtitle {
                     Text(subtitle)
@@ -55,23 +69,19 @@ public struct BideTileView: View {
                 }
             }
             .multilineTextAlignment(.center)
+            // Grow downwards rather than truncate. A bubble in the transcript
+            // is laid out at whatever width Messages decides, which is narrow
+            // enough that "Today · 3:30 PM • Waiting for replies" does not fit
+            // on one line — and half a sentence is worse than two lines.
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 16)
+        // Messages stamps the app's badge over the tile's top-left corner. The
+        // extra top padding is what keeps it off the mark instead of over it.
+        .padding(.top, 16 + BideMetrics.tileBadgeClearance)
+        .padding(.bottom, 16)
         .background(BideColor.background, in: RoundedRectangle(cornerRadius: BideMetrics.tileRadius, style: .continuous))
-    }
-
-    @ViewBuilder
-    private var leading: some View {
-        switch glyph {
-        case .mark:
-            BideMark(.vertical, dotDiameter: 7)
-        case .mode(let mode):
-            Image(systemName: mode.symbolName)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(BideColor.primaryText)
-        }
     }
 }
 
@@ -81,12 +91,16 @@ extension BideTileView {
     /// the invite in the message URL, who sent it, and whatever answer this
     /// device has given. There is no server call here — a transcript view is
     /// rendered by Messages, not by us, and must be cheap.
+    /// - Parameter mode: How this device said it would travel, when it has
+    ///   said. Shown beside the countdown; nil simply leaves it off, which is
+    ///   what the fallback snapshot and anyone else's tile get.
     public static func transcript(
         invite: BideInvite,
         senderName: String?,
         role: ParticipantRole,
         answer: ParticipantStatus?,
         leaveAt: Date? = nil,
+        mode: TravelMode? = nil,
         now: Date = Date()
     ) -> BideTileView {
         let schedule = BideFormat.schedule(invite.scheduledFor, now: now)
@@ -98,9 +112,9 @@ extension BideTileView {
         case .accepted, .arrived:
             if let leaveAt, leaveAt > now {
                 return BideTileView(
-                    glyph: .mode(.driving),
                     title: "",
                     subtitle: invite.destinationName,
+                    mode: mode,
                     countdownTo: leaveAt
                 )
             }

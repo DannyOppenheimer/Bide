@@ -96,7 +96,11 @@ public enum BidePlanner {
         if state.isAwaitingAnswers {
             return "Waiting for everyone to answer"
         }
-        return "Heading to \(state.destinationName)"
+        // Deliberately not "Heading to <place>". Every surface that shows this
+        // line now shows the destination beside it, so naming it here printed
+        // it twice; this says the thing the destination can't, which is that
+        // everybody has said yes and nobody has moved.
+        return "Nobody has set off yet"
     }
 
     /// `max` over two optionals, where nil means "no opinion" rather than
