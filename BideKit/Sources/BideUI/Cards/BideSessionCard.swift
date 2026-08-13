@@ -83,50 +83,26 @@ public struct BideSessionCard: View {
 
     private var content: some View {
         VStack(spacing: 14) {
-            ZStack(alignment: .topLeading) {
-                VStack(spacing: 6) {
-                    BideMark(.horizontal, dotDiameter: 7)
-                    Text(headline)
-                        .font(BideFont.cardTitle)
-                        .foregroundStyle(BideColor.primaryText)
+            VStack(spacing: 6) {
+                heading
+                Text(headline)
+                    .font(BideFont.cardTitle)
+                    .foregroundStyle(BideColor.primaryText)
+                    .multilineTextAlignment(.center)
+                if let destination, !destination.isEmpty {
+                    Text(destination)
+                        .font(BideFont.caption)
+                        .foregroundStyle(BideColor.secondaryText)
                         .multilineTextAlignment(.center)
-                    if let destination, !destination.isEmpty {
-                        Text(destination)
-                            .font(BideFont.caption)
-                            .foregroundStyle(BideColor.secondaryText)
-                            .multilineTextAlignment(.center)
-                    }
-                    if let companionNote, !companionNote.isEmpty {
-                        Text(companionNote)
-                            .font(BideFont.caption)
-                            .foregroundStyle(BideColor.secondaryText.opacity(0.75))
-                            .multilineTextAlignment(.center)
-                    }
                 }
-                .frame(maxWidth: .infinity)
-
-                if showsBadge {
-                    // The watcher badge takes priority over the movement badge.
-                    if isWatching {
-                        WatchingPill()
-                    } else if isLive {
-                        LivePill()
-                    }
-                }
-
-                if let onShare {
-                    Button(action: onShare) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(BideColor.secondaryText)
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Share this Bide so someone can track it")
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                if let companionNote, !companionNote.isEmpty {
+                    Text(companionNote)
+                        .font(BideFont.caption)
+                        .foregroundStyle(BideColor.secondaryText.opacity(0.75))
+                        .multilineTextAlignment(.center)
                 }
             }
+            .frame(maxWidth: .infinity)
 
             if !participants.isEmpty {
                 roster
@@ -138,6 +114,43 @@ public struct BideSessionCard: View {
             if isWatching {
                 RoundedRectangle(cornerRadius: BideMetrics.cardRadius, style: .continuous)
                     .strokeBorder(BideColor.watching.opacity(0.55), lineWidth: 1.5)
+            }
+        }
+    }
+
+    /// The mark, with the badge and share control beside it.
+    ///
+    /// One row rather than an overlay: floating the badge over the centred stack
+    /// let a headline that wrapped run underneath it, and a short card had no
+    /// spare height for it to run into. Laid out as a row, the badge sets the
+    /// row's height and the headline always begins below it.
+    private var heading: some View {
+        ZStack {
+            BideMark(.horizontal, dotDiameter: 7)
+
+            if showsBadge {
+                // The watcher badge takes priority over the movement badge.
+                Group {
+                    if isWatching {
+                        WatchingPill()
+                    } else if isLive {
+                        LivePill()
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if let onShare {
+                Button(action: onShare) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(BideColor.secondaryText)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Share this Bide so someone can track it")
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
     }

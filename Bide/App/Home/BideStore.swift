@@ -109,6 +109,7 @@ final class BideStore {
             let now = Date()
             bides = try await api.fetchMyBides().filter { !$0.isComplete && !$0.isExpired(now: now) }
             adoptRecordedDepartures()
+            await restoreTravellers()
             errorMessage = nil
             reconcileTracking()
         } catch let error as APIError {
@@ -279,15 +280,60 @@ final class BideStore {
 
     /// Joins another participant's trip as a watcher without starting an ETA.
     func watch(_ tile: BideTileMessage) async {
+        let bideID = tile.invite.bideID
+
+        // Nobody follows their own trip. A tracking link is a normal URL: the
+        // person who shared it can open it on this device or another, and doing
+        // so must not turn the traveller into their own audience — a solo bide
+        // whose creator is watching has nobody left going on it, which is what
+        // "Nobody is going any more" was reporting.
+        //
+        // Asked of the server rather than the local list, because opening a link
+        // can be what launches the app, before any bide has been fetched.
+        if let existing = try? await api.fetchBideState(bideID: bideID), isMine(existing) {
+            merge(existing)
+            await restoreTravellers()
+            reconcileTracking()
+            return
+        }
+
         await perform {
             let state = try await self.api.joinBide(
-                bideID: tile.invite.bideID,
+                bideID: bideID,
                 mode: .walking,
                 status: .watching
             )
             self.merge(state)
             // Ensure the newly watched bide does not replace the active journey.
             self.reconcileTracking()
+        }
+    }
+
+    /// Whether this is a bide the local user is going on rather than following.
+    private func isMine(_ state: BideState) -> Bool {
+        guard let userID else { return false }
+        return state.createdBy == userID || state.participant(userID)?.status.isTravelling == true
+    }
+
+    /// Puts the creator of a solo bide back on their own trip.
+    ///
+    /// Repairs bides already left watching themselves. That row is the only
+    /// thing holding the journey, so while it says `watching` the bide has no
+    /// traveller, publishes no ETA, and reads as though everyone dropped out.
+    /// Nothing may create this state any more, so this is only ever a repair.
+    private func restoreTravellers() async {
+        guard let userID else { return }
+
+        for state in bides where state.isSolo && state.createdBy == userID {
+            guard let mine = state.participant(userID), mine.status.isWatching else { continue }
+            await perform {
+                let restored = try await self.api.joinBide(
+                    bideID: state.bideID,
+                    mode: mine.mode,
+                    status: .accepted
+                )
+                self.merge(restored)
+            }
         }
     }
 

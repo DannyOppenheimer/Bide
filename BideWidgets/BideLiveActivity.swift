@@ -56,9 +56,11 @@ struct BideLiveActivity: Widget {
                 .font(BideFont.caption)
                 .foregroundStyle(BideColor.primaryText)
             } minimal: {
-                // Use the narrow vertical mark and an offset that does not affect layout size.
+                // Nudge the narrow vertical mark off the edge. Kept small because
+                // the offset does not grow the frame, so a large shift shows the
+                // mark outside the region the system sized for it and it clips.
                 BideMark(.vertical, dotDiameter: 4)
-                    .offset(x: 7)
+                    .offset(x: 2)
             }
             .keylineTint(BideColor.live)
         }
