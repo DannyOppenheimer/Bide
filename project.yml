@@ -15,6 +15,8 @@ settings:
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: "FYL86KHVDH"
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
 
 packages:
   BideKit:
@@ -63,7 +65,10 @@ targets:
       - path: Bide/App
     settings:
       base:
+        DEVELOPMENT_TEAM: "FYL86KHVDH"
         PRODUCT_BUNDLE_IDENTIFIER: app.trybide.bide
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Bide/App/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_ENTITLEMENTS: Bide/App/Bide.entitlements
@@ -72,6 +77,8 @@ targets:
       path: Bide/App/Info.plist
       properties:
         CFBundleDisplayName: Bide
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -114,7 +121,10 @@ targets:
       - path: BideMessages
     settings:
       base:
+        DEVELOPMENT_TEAM: "FYL86KHVDH"
         PRODUCT_BUNDLE_IDENTIFIER: app.trybide.bide.BideMessages
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: BideMessages/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         SKIP_INSTALL: "YES"
@@ -125,6 +135,8 @@ targets:
       path: BideMessages/Info.plist
       properties:
         CFBundleDisplayName: Bide
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # XcodeGen does not emit the required extension package type automatically.
         CFBundlePackageType: "XPC!"
         # Used only for a foreground travel-time preview in the expanded tile.
@@ -148,7 +160,10 @@ targets:
       - path: BideWidgets
     settings:
       base:
+        DEVELOPMENT_TEAM: "FYL86KHVDH"
         PRODUCT_BUNDLE_IDENTIFIER: app.trybide.bide.BideWidgets
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: BideWidgets/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         SKIP_INSTALL: "YES"
@@ -157,6 +172,8 @@ targets:
       path: BideWidgets/Info.plist
       properties:
         CFBundleDisplayName: Bide
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundlePackageType: "XPC!"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
