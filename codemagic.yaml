@@ -6,6 +6,10 @@ workflows:
     integrations:
       app_store_connect: Codemagic_ASC_Key
     environment:
+      ios_signing:
+          provisioning_profiles: []
+          certificates:
+            - "Bide Cert"
       xcode: latest
       vars:
         XCODE_PROJECT: "Bide.xcodeproj"
