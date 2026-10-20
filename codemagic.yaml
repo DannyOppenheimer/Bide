@@ -6,8 +6,6 @@ workflows:
     integrations:
       app_store_connect: Codemagic_ASC_Key
     environment:
-      ios_signing:
-        distribution_type: app_store
       xcode: latest
       vars:
         XCODE_PROJECT: "Bide.xcodeproj"
@@ -16,8 +14,13 @@ workflows:
       - name: Generate Xcode Project with XcodeGen
         script: |
           xcodegen generate
-      - name: Fetch signing files and apply profiles
+      - name: Fetch signing files for all targets
         script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "app.trybide.bide" --type IOS_APP_STORE --create
+          app-store-connect fetch-signing-files "app.trybide.bide.messages" --type IOS_APP_STORE --create || true
+          app-store-connect fetch-signing-files "app.trybide.bide.widgets" --type IOS_APP_STORE --create || true
+          keychain add-certificates
           xcode-project use-profiles
       - name: Build Signed IPA
         script: |
