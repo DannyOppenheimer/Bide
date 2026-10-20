@@ -1,0 +1,30 @@
+workflows:
+  ios-release:
+    name: Bide iOS Release
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: Codemagic_ASC_Key
+    environment:
+      ios_signing:
+        distribution_type: ad_hoc
+        bundle_identifier: app.trybide.bide
+      xcode: latest
+      vars:
+        XCODE_PROJECT: "Bide.xcodeproj"
+        XCODE_SCHEME: "Bide"
+    scripts:
+      - name: Generate Xcode Project with XcodeGen
+        script: |
+          xcodegen generate
+      - name: Fetch signing files and apply profiles
+        script: |
+          xcode-project use-profiles
+      - name: Build Signed IPA
+        script: |
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
