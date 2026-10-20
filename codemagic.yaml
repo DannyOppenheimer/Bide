@@ -23,7 +23,6 @@ workflows:
           python3 -c '
           import os, re, textwrap
           k = os.environ.get("CERTIFICATE_PRIVATE_KEY", "").strip()
-          print("CERTIFICATE_PRIVATE_KEY length:", len(k))
           body = re.sub(r"-----[A-Z0-9 ]+-----|\s+", "", k)
           if body:
               open("/tmp/cert_key.pem", "w").write("-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(textwrap.wrap(body, 64)) + "\n-----END RSA PRIVATE KEY-----\n")
