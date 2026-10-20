@@ -10,10 +10,6 @@ workflows:
       vars:
         XCODE_PROJECT: "Bide.xcodeproj"
         XCODE_SCHEME: "Bide"
-      ios_signing:
-        certificates:
-          - "Bide Cert"
-        provisioning_profiles: []
     scripts:
       - name: Generate Xcode Project with XcodeGen
         script: |
