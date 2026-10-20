@@ -10,19 +10,21 @@ workflows:
       vars:
         XCODE_PROJECT: "Bide.xcodeproj"
         XCODE_SCHEME: "Bide"
+      ios_signing:
+        certificates:
+          - "Bide Cert"
+        provisioning_profiles:
+          - distribution: app_store
+            bundle_id: app.trybide.bide
+          - distribution: app_store
+            bundle_id: app.trybide.bide.BideMessages
+          - distribution: app_store
+            bundle_id: app.trybide.bide.BideWidgets
     scripts:
       - name: Generate Xcode Project with XcodeGen
         script: |
           HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
           xcodegen generate
-      - name: Fetch signing files for all targets
-        script: |
-          keychain initialize
-          app-store-connect fetch-signing-files "app.trybide.bide" --type IOS_APP_STORE --create
-          app-store-connect fetch-signing-files "app.trybide.bide.BideMessages" --type IOS_APP_STORE --create
-          app-store-connect fetch-signing-files "app.trybide.bide.BideWidgets" --type IOS_APP_STORE --create
-          keychain add-certificates
-          xcode-project use-profiles
       - name: Build Signed IPA
         script: |
           xcode-project build-ipa \
