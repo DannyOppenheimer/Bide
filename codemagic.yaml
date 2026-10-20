@@ -13,6 +13,7 @@ workflows:
     scripts:
       - name: Generate Xcode Project with XcodeGen
         script: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
           xcodegen generate
       - name: Fetch signing files for all targets
         script: |
