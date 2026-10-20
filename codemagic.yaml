@@ -7,8 +7,7 @@ workflows:
       app_store_connect: Codemagic_ASC_Key
     environment:
       ios_signing:
-        distribution_type: ad_hoc
-        bundle_identifier: app.trybide.bide
+        distribution_type: app_store
       xcode: latest
       vars:
         XCODE_PROJECT: "Bide.xcodeproj"
@@ -28,3 +27,7 @@ workflows:
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
