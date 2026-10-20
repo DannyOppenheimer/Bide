@@ -19,8 +19,8 @@ workflows:
         script: |
           keychain initialize
           app-store-connect fetch-signing-files "app.trybide.bide" --type IOS_APP_STORE --create
-          app-store-connect fetch-signing-files "app.trybide.bide.messages" --type IOS_APP_STORE --create || true
-          app-store-connect fetch-signing-files "app.trybide.bide.widgets" --type IOS_APP_STORE --create || true
+          app-store-connect fetch-signing-files "app.trybide.bide.BideMessages" --type IOS_APP_STORE --create
+          app-store-connect fetch-signing-files "app.trybide.bide.BideWidgets" --type IOS_APP_STORE --create
           keychain add-certificates
           xcode-project use-profiles
       - name: Build Signed IPA
