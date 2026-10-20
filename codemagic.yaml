@@ -26,9 +26,8 @@ workflows:
           m = re.search(r"-----BEGIN ([A-Z ]+)-----(.*)-----END \1-----", k, re.S)
           if m:
               hdr, body = m.group(1), re.sub(r"\s+", "", m.group(2))
-              open("/tmp/raw_key.pem", "w").write(f"-----BEGIN {hdr}-----\n" + "\n".join(textwrap.wrap(body, 64)) + f"\n-----END {hdr}-----\n")
+              open("/tmp/cert_key.pem", "w").write(f"-----BEGIN {hdr}-----\n" + "\n".join(textwrap.wrap(body, 64)) + f"\n-----END {hdr}-----\n")
           '
-          openssl rsa -in /tmp/raw_key.pem -traditional -out /tmp/cert_key.pem 2>/dev/null || ssh-keygen -t rsa -b 2048 -m PEM -f /tmp/cert_key.pem -q -N ""
           unset CERTIFICATE_PRIVATE_KEY
           app-store-connect fetch-signing-files "app.trybide.bide" --type IOS_APP_STORE --create --certificate-key=@file:/tmp/cert_key.pem
           app-store-connect fetch-signing-files "app.trybide.bide.BideMessages" --type IOS_APP_STORE --create --certificate-key=@file:/tmp/cert_key.pem
